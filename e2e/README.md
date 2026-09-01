@@ -3,16 +3,18 @@
 ## 文件
 | 文件 | 作用 |
 |---|---|
-| `test_e2e.py` | 端到端测试(双端 platform 自动分派, 8 子命令 + `--json`) |
-| `check_consistency.py` | 架构一致性校验(skills↔langlobal 同步 + wechat↔wecom vendored 一致) |
+| `test_e2e.py` | 端到端测试（双端 platform 自动分派，含系统事件与 JSON 输出） |
+| `check_consistency.py` | 开发仓与一个已安装运行单元的一致性校验；跨 wecom 检查按需启用 |
 
 > 另有单元测试(pytest, **无需真实数据**)在 `tests/`(langlobal):`python3 -m pytest tests/ -v`
 
 ## 跑法
 ```bash
-python3 e2e/test_e2e.py            # 端到端 12 项(轻量)
-python3 e2e/test_e2e.py --full     # + media/export(慢)
-python3 e2e/check_consistency.py   # 一致性校验
+python3 e2e/test_e2e.py            # 端到端 13 项（轻量）
+python3 e2e/test_e2e.py --full     # 15 项，增加 media/export（慢）
+python3 e2e/check_consistency.py                         # 自动发现 .agents/.codex/.claude
+python3 e2e/check_consistency.py --skill-dir /path/to/skill
+python3 e2e/check_consistency.py --with-vendored         # 额外检查 wecom 共享文件
 ```
 退出码 0=全过 / 1=有失败,可接 CI。
 
@@ -23,6 +25,6 @@ python3 e2e/check_consistency.py   # 一致性校验
 
 ## 改代码后 —— 确保一致性三步
 ```
-改代码 → check_consistency.py(查漂移) → test_e2e.py(查功能) → 都绿才 commit
+改代码 → pytest(合成库) → check_consistency.py(运行单元漂移) → test_e2e.py(真实数据)
 ```
 跨项目总指南见 `Langlobal/decrypt-shared/TESTING.md`;架构目标骨架见 `Langlobal/decrypt-shared/decrypt-modules-alignment.md`。

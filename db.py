@@ -5,6 +5,7 @@ import glob
 import hashlib
 import io
 import os
+from pathlib import Path
 import sqlite3
 import subprocess
 
@@ -15,12 +16,31 @@ csv.field_size_limit(sys.maxsize)
 
 
 def _exec_sqlite3(db_path: str, sql: str) -> list[sqlite3.Row]:
-    con = sqlite3.connect(db_path)
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True)
     con.row_factory = sqlite3.Row
     try:
+        con.execute("PRAGMA query_only = ON;")
         return con.execute(sql).fetchall()
     finally:
         con.close()
+
+
+def _run_sqlcipher(db_path: str, sql: str, timeout: int) -> str:
+    result = subprocess.run(
+        [config.SQLCIPHER_PATH, "-readonly", db_path],
+        input=sql.encode(),
+        capture_output=True,
+        timeout=timeout,
+    )
+    stdout = result.stdout.decode("utf-8", errors="replace").strip()
+    stderr = result.stderr.decode("utf-8", errors="replace").strip()
+    if result.returncode != 0 or "error" in stderr.lower():
+        detail = stderr or stdout or f"exit code {result.returncode}"
+        raise RuntimeError(
+            f"SQLCipher 查询失败 ({os.path.basename(db_path)}): {detail[:500]}"
+        )
+    return stdout
 
 
 def preamble(key: str, db_path: str | None = None) -> str:
@@ -38,9 +58,7 @@ def test_key(key: str, db_path: str) -> bool:
     """Test if a database is readable (sqlcipher: key works / sqlite3: plaintext opens)."""
     if config.DB_BACKEND == "sqlite3":
         try:
-            con = sqlite3.connect(db_path)
-            con.execute("SELECT count(*) FROM sqlite_master;").fetchone()
-            con.close()
+            _exec_sqlite3(db_path, "SELECT count(*) FROM sqlite_master;")
             return True
         except Exception:
             return False
@@ -49,14 +67,7 @@ def test_key(key: str, db_path: str) -> bool:
         + "SELECT count(*) FROM sqlite_master;\n"
     )
     try:
-        result = subprocess.run(
-            [config.SQLCIPHER_PATH, db_path],
-            input=cmd.encode(), capture_output=True, timeout=5,
-        )
-        stdout = result.stdout.decode().strip()
-        stderr = result.stderr.decode().strip()
-        if "error" in stderr.lower():
-            return False
+        stdout = _run_sqlcipher(db_path, cmd, timeout=5)
         lines = [l.strip() for l in stdout.split("\n") if l.strip() and l.strip() != "ok"]
         return any(l.isdigit() and int(l) > 0 for l in lines)
     except Exception:
@@ -69,11 +80,7 @@ def query(db_path: str, sql: str) -> list[dict]:
         return [dict(r) for r in _exec_sqlite3(db_path, sql)]
     key = crypto.load_key()
     cmd = preamble(key, db_path) + ".headers on\n.mode csv\n" + sql
-    result = subprocess.run(
-        [config.SQLCIPHER_PATH, db_path],
-        input=cmd.encode(), capture_output=True, timeout=30,
-    )
-    text = result.stdout.decode("utf-8", errors="replace").strip()
+    text = _run_sqlcipher(db_path, cmd, timeout=30)
     if not text:
         return []
     lines = text.split("\n")
@@ -91,11 +98,7 @@ def query_raw(db_path: str, sql: str) -> list[str]:
         return ["|".join("" if c is None else str(c) for c in tuple(r)) for r in rows]
     key = crypto.load_key()
     cmd = preamble(key, db_path) + sql
-    result = subprocess.run(
-        [config.SQLCIPHER_PATH, db_path],
-        input=cmd.encode(), capture_output=True, timeout=30,
-    )
-    text = result.stdout.decode("utf-8", errors="replace").strip()
+    text = _run_sqlcipher(db_path, cmd, timeout=30)
     return [l for l in text.split("\n") if l.strip() and l.strip() != "ok"]
 
 
@@ -109,17 +112,30 @@ def get_my_wxid() -> str:
     return _re.sub(r'_[^_]+$', '', account)
 
 
-_data_dir_cache: str | None = None
+_data_dir_cache: tuple[tuple[str, str], str] | None = None
+
+
+def _data_dir_signature() -> tuple[str, str]:
+    root = (
+        config.DECRYPTED_DIR
+        if config.DB_BACKEND == "sqlite3"
+        else config.WECHAT_DATA_GLOB
+    )
+    return config.DB_BACKEND, root
 
 
 def find_data_dir() -> str:
     """Find the WeChat db_storage directory (most recent with valid key). Cached per process."""
     global _data_dir_cache
+    signature = _data_dir_signature()
     if _data_dir_cache:
-        return _data_dir_cache
+        cached_signature, cached_path = _data_dir_cache
+        if cached_signature == signature and os.path.isdir(cached_path):
+            return cached_path
     if config.DB_BACKEND == "sqlite3":
-        _data_dir_cache = _find_decrypted_data_dir()
-        return _data_dir_cache
+        path = _find_decrypted_data_dir()
+        _data_dir_cache = signature, path
+        return path
     matches = sorted(glob.glob(config.WECHAT_DATA_GLOB), key=os.path.getmtime, reverse=True)
     if not matches:
         raise FileNotFoundError(f"未找到 WeChat 数据目录: {config.WECHAT_DATA_GLOB}")
@@ -127,10 +143,10 @@ def find_data_dir() -> str:
     for match in matches:
         msg_db = os.path.join(match, "message", "message_0.db")
         if os.path.exists(msg_db) and test_key(key, msg_db):
-            _data_dir_cache = match
+            _data_dir_cache = signature, match
             return match
-    _data_dir_cache = matches[0]
-    return _data_dir_cache
+    _data_dir_cache = signature, matches[0]
+    return matches[0]
 
 
 def _find_decrypted_data_dir() -> str:
@@ -152,23 +168,26 @@ def _find_decrypted_data_dir() -> str:
     return os.path.dirname(os.path.dirname(hits[0]))
 
 
-_message_dbs_cache: list[str] | None = None
+_message_dbs_cache: tuple[str, list[str]] | None = None
 
 
 def get_message_dbs() -> list[str]:
     """Get paths to all message database files that our key can access. Cached per process."""
     global _message_dbs_cache
-    if _message_dbs_cache is not None:
-        return _message_dbs_cache
     data_dir = find_data_dir()
+    if _message_dbs_cache is not None:
+        cached_dir, cached_dbs = _message_dbs_cache
+        if cached_dir == data_dir and all(os.path.isfile(path) for path in cached_dbs):
+            return cached_dbs
     pattern = os.path.join(data_dir, "message", "message_[0-9].db")
     dbs = sorted(glob.glob(pattern))
     if config.DB_BACKEND == "sqlite3":
-        _message_dbs_cache = [db for db in dbs if test_key("", db)]
+        valid = [db for db in dbs if test_key("", db)]
     else:
         key = crypto.load_key()
-        _message_dbs_cache = [db for db in dbs if test_key(key, db)]
-    return _message_dbs_cache
+        valid = [db for db in dbs if test_key(key, db)]
+    _message_dbs_cache = data_dir, valid
+    return valid
 
 
 def get_name2id() -> dict[str, str]:
@@ -198,10 +217,10 @@ _contact_db_path: str | None = None
 def get_contact_db_path() -> str:
     """Find the contact.db path under the active db_storage directory."""
     global _contact_db_path
-    if _contact_db_path and os.path.exists(_contact_db_path):
-        return _contact_db_path
     data_dir = find_data_dir()
     path = os.path.join(data_dir, "contact", "contact.db")
+    if _contact_db_path == path and os.path.exists(path):
+        return path
     if os.path.exists(path):
         _contact_db_path = path
         return path
@@ -211,12 +230,21 @@ def get_contact_db_path() -> str:
 _media_db_path: str | None = None
 
 
+def reset_caches() -> None:
+    """Clear path and database discovery caches."""
+    global _data_dir_cache, _message_dbs_cache, _contact_db_path, _media_db_path
+    _data_dir_cache = None
+    _message_dbs_cache = None
+    _contact_db_path = None
+    _media_db_path = None
+
+
 def get_media_db() -> str:
     """Find media_0.db (voice/media BLOBs) under the active db_storage."""
     global _media_db_path
-    if _media_db_path and os.path.exists(_media_db_path):
-        return _media_db_path
     path = os.path.join(find_data_dir(), "message", "media_0.db")
+    if _media_db_path == path and os.path.exists(path):
+        return path
     if os.path.exists(path):
         _media_db_path = path
         return path

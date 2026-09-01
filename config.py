@@ -1,6 +1,7 @@
 """WeChat MCP Server — configuration and platform detection."""
 import os
 import platform
+import shutil
 
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -12,7 +13,11 @@ IS_WINDOWS = platform.system() == "Windows"
 
 if IS_MACOS:
     DB_BACKEND = "sqlcipher"
-    SQLCIPHER_PATH = "/opt/homebrew/bin/sqlcipher"
+    SQLCIPHER_PATH = (
+        os.environ.get("WECHAT_SQLCIPHER_PATH")
+        or shutil.which("sqlcipher")
+        or "/opt/homebrew/bin/sqlcipher"
+    )
     WECHAT_DATA_GLOB = os.path.expanduser(
         "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/"
         "xwechat_files/*/db_storage"

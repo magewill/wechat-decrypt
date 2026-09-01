@@ -1,122 +1,119 @@
 # wechat-decrypt
 
+[![tests](https://github.com/tzwkb/wechat-decrypt/actions/workflows/tests.yml/badge.svg)](https://github.com/tzwkb/wechat-decrypt/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Agent Skill](https://img.shields.io/badge/Agent%20Skill-Codex-blue.svg)](SKILL.md)
-[![Python](https://img.shields.io/badge/Python-3.x-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
 [English](README.md) | 中文
 
-**Agent Skill** — WeChat 4.x 聊天记录解密、查询、导出和语音转写工具，支持 macOS/Windows 已验证流程与 MCP 查询接口。
+一个本地优先的 [Codex Skill](https://developers.openai.com/codex/skills)：在 macOS 和 Windows 上读取、搜索、总结、导出并转写 WeChat 4.x 聊天记录。命令行核心不依赖 MCP；随附服务提供可选的 [Codex MCP](https://developers.openai.com/codex/mcp) 门面。
 
+仅用于你本人拥有或获授权访问的本地数据。
 
-作为 Agent Skill 分发：拷贝整个目录到对应 agent 的 skills 目录，Agent 通过 [SKILL.md](SKILL.md) 自动加载触发规则，并以 MCP Server 形式暴露查询工具。也可脱离 Agent 单独运行导出脚本。
+## 能力
 
-## 架构
+- 列出会话，解析备注、昵称、微信号和群名。
+- 跨多个数据库分片读取、搜索、总结和统计消息。
+- 识别拍一拍、撤回、群/好友变更、红包、转账、通话、置顶及未知系统事件。
+- 按联系人和日期范围完整导出，不设人为条数上限。
+- 用 Whisper 转写已经下载到本地的 SILK 语音。
+- 自检安装状态，但不暴露 raw key。
+- 提供已验证的 macOS 与 Windows 密钥/解密流程。
 
-```
-微信 → WCDB 加密层
-         │
-         ├── macOS:  CCKeyDerivationPBKDF → Frida hook → raw key
-         │
-         └── Windows: SQLCipher (静态链接) → wechat-dump-rs → raw key
-                                                                    │
-                                              PBKDF2(raw_key, salt, 256000)
-                                                                    │
-                                              sqlcipher (kdf_iter=1) ─┬─ MCP Server（浏览/搜索）
-                                                                      │
-                                                                      └─ export_chat.py（导出+语音转写）
+```text
+macOS:  微信加密库 ── raw key ── SQLCipher 只读 ───────┐
+                                                       ├─ query.py ── CLI / MCP
+Windows: 微信加密库 ── raw key ── 私有明文镜像只读 ──┘             └─ 导出 / 语音
 ```
 
 ## 快速开始
 
-```bash
-bash setup.sh               # macOS 一键安装
-# 或
-powershell -File setup.ps1  # Windows
+克隆仓库后，在仓库根目录运行安装脚本。
 
-# 提取密钥 → 写入 key.txt → 重启 Claude Code
+### macOS
+
+```bash
+bash setup.sh
+.venv/bin/python scripts/common/doctor.py --json
 ```
 
-详见 [SKILL.md](SKILL.md)。
+安装脚本会创建隔离的 `.venv`、安装 SQLCipher 与 Python 依赖、把当前仓库链接到 `$HOME/.agents/skills/wechat-decrypt`，并向 Codex 注册 `wechat` stdio MCP。
 
-## 功能
+首次提取密钥需要临时 ad-hoc 重签名：
 
-### MCP Server (`server.py`)
+```bash
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+bash scripts/macos/extract_key.sh
+```
+
+脚本会关闭微信，通过 Frida 启动并等待扫码登录。成功后，从 App Store 或微信官网重装微信，恢复腾讯官方签名。提取前先读 [macOS 指南](references/macos.md)。
+
+### Windows
+
+```powershell
+powershell -File setup.ps1
+$Python = ".\.venv\Scripts\python.exe"
+& $Python scripts\windows\extract_raw_key.py
+& $Python scripts\windows\decrypt_all.py
+& $Python scripts\common\doctor.py --json
+```
+
+提取器会关闭微信，并要求你从可见桌面手动重启。随后 `decrypt_all.py` 创建私有的本地明文镜像，查询层只读访问它。详见 [Windows 指南](references/windows.md)。
+
+## 查询
+
+Agent 调用建议使用 `--json`；人工调试可省略。
+
+```bash
+.venv/bin/python scripts/common/query.py list --json
+.venv/bin/python scripts/common/query.py read "张三" -d 7 -n 50 --json
+.venv/bin/python scripts/common/query.py search "截止时间" -d 30 -n 50 --json
+.venv/bin/python scripts/common/query.py recent -d 3 -n 100 --json
+.venv/bin/python scripts/common/query.py summary -d 3 --json
+.venv/bin/python scripts/common/query.py events -e 拍一拍 -d 30 -n 100 --json
+```
+
+稳定事件码包括 `pat`、`recall`、`group_join`、`group_remove`、`group_leave`、`group_rename`、`group_notice`、`group_admin`、`group_owner`、`group_disband`、`friend_added`、`red_packet`、`payment`、`call`、`chat_pinned` 和 `system`；也可直接使用中文标签筛选。
+
+MCP 暴露相同核心能力：
 
 | 工具 | 用途 |
-|------|------|
-| `wechat_list_chats` | 所有会话列表 |
-| `wechat_read_chat` | 读取特定对话 |
+|---|---|
+| `wechat_list_chats` | 列出会话 |
+| `wechat_read_chat` | 读取联系人或群聊 |
 | `wechat_search_messages` | 全文搜索 |
-| `wechat_recent_messages` | 最近动态 |
-| `wechat_chat_summary` | 结构化摘要 + 待办提取 |
+| `wechat_recent_messages` | 查看最近动态 |
+| `wechat_chat_summary` | 提供结构化近期聊天上下文 |
+| `wechat_system_events` | 拍一拍、撤回、群/好友变更、红包、转账、通话、置顶及未知事件 |
 
-### 导出脚本 (`scripts/common/export_chat.py`)
+## 导出与语音
 
 ```bash
-python3 scripts/common/export_chat.py 张三 --year 2026 -o ~/Desktop/out.txt
-python3 scripts/common/export_chat.py 张三 --start 2026-01-01 --end 2026-06-03
-python3 scripts/common/export_chat.py 张三 --year 2026 --transcribe   # 语音转文字
+.venv/bin/python scripts/common/export_chat.py "张三" --year 2026 -o ~/Desktop/zhangsan-2026.txt
+.venv/bin/python scripts/common/export_chat.py "张三" --start 2026-01-01 --end 2026-06-30
 ```
 
-- 自动按月分片，无条数上限
-- 支持整年或自定义区间
-- 说话人用各自的微信昵称（非备注）；发送者身份逐 DB 解析，避免跨 DB rowid 冲突
-- 消息格式：
-  - 文本：原文，换行转空格
-  - 图片：`[Image]`
-  - 视频：`[Video]`
-  - 贴纸：`[Sticker]`
-  - 语音：`[Audio 5s]`（含时长）
-  - 引用回复：`回复文字 [↩ 发件人: 被引内容]`
-  - 链接/小程序：`[Link: 标题]` / `[MiniApp: 名称]`
-  - 转发聊天记录：`[Chat History]`
-- `--transcribe` 全自动语音转写（见下方）
+平台对应的 Whisper large-v3 模型已缓存时，语音默认自动转写；模型不在时，普通导出保留 `[Audio]`，不会自行下载。只有确认约 3 GB 的首次下载后才使用 `--transcribe`；用 `--no-transcribe` 可明确关闭。详见 [导出与转写指南](references/export-transcription.md)。
 
-### 语音转写（`scripts/common/transcribe_db.py` + `voice_decode.py`）
+## 安全模型
 
-全自动，无需播放/录音/重启。仅在 `--transcribe` 且存在语音消息时触发：
-1. 收集目标对话 `local_type=34` 的 `server_id`
-2. 从 `media_0.db` 的 `VoiceInfo` 表直取 `voice_data`（SILK v3 BLOB）
-3. `pilk` 解码 SILK → 24kHz wav（首字节 `0x02` 为微信私有前缀，需剥离）
-4. `mlx-whisper` large-v3 转写（`language=zh`，Apple Silicon Metal 加速）
-5. 按 `svr_id == server_id` 精确回填到每条消息（不依赖播放顺序）
+- 查询后端始终只读打开数据库；SQLite 额外启用 `query_only`。
+- Raw key 会校验格式、以私有权限保存、被 Git 忽略，提取器和自检均不回显。
+- 明文数据库、导出、派生密钥缓存和语音缓存尽可能使用私有权限。
+- 项目不上传聊天数据，也不调用云端语音转写服务。
+- 严禁提交 `key.txt`、`key_windows.txt`、`decrypted/`、`all_keys.json`、`contacts.json`、`voice_cache.json`。
 
-依赖全部装在全局 `/opt/homebrew/bin/python3`：
+## 开发
 
-| 组件 | 大小 | 位置 |
-|------|------|------|
-| pilk | <1MB | 全局 site-packages |
-| mlx-whisper | ~150MB（含 mlx/torch） | 全局 site-packages |
-| whisper-large-v3 模型 | ~3GB | `~/.cache/huggingface/` |
+单元测试使用合成数据库，不读取个人微信数据：
 
-> 旧的 BlackHole + Swift Speech 方案已移到 `scripts/legacy/`（仅 Intel Mac 或无 `VoiceInfo` 时备用）。
+```bash
+python3 -m pytest -q
+python3 -m compileall -q config.py contacts.py crypto.py db.py message.py server.py scripts/common scripts/windows
+bash -n setup.sh scripts/macos/extract_key.sh
+```
 
-## 平台差异
-
-| | macOS | Windows |
-|---|---|---|
-| 密钥提取 | Frida `CCKeyDerivationPBKDF` | wechat-dump-rs 内存扫描 |
-| 前置步骤 | codesign 重签名 | 无 |
-| DB 路径 | `~/Library/Containers/...` | `~/Documents/xwechat_files/...` |
-| sqlcipher | brew 安装 | 随 skill 分发 |
-| 语音转写 | VoiceInfo 直取 + mlx-whisper（Apple Silicon） | 未适配 |
-
-## 文件
-
-| 文件 | 用途 |
-|------|------|
-| `SKILL.md` | Agent 指令 |
-| `server.py` | MCP Server |
-| `scripts/common/export_chat.py` | 导出脚本（自动分片） |
-| `scripts/common/transcribe_db.py` | 语音转写（VoiceInfo + mlx-whisper） |
-| `scripts/common/voice_decode.py` | SILK v3 BLOB → wav 解码 |
-| `scripts/common/verify_key.py` | HMAC 密钥验证 |
-| `scripts/macos/extract_key.sh` | macOS 密钥提取 |
-| `scripts/macos/hook_pbkdf.js` | Frida 拦截（macOS 提取） |
-| `scripts/windows/extract_key.ps1` | Windows 密钥提取 + 解密（wechat-dump-rs） |
-| `scripts/legacy/` | 旧 BlackHole+Swift 方案（备用） |
-| `setup.sh / setup.ps1` | 平台安装脚本 |
+真实数据检查见 [e2e/README.md](e2e/README.md)。Skill 入口是 [SKILL.md](SKILL.md)；平台和导出细节放在 `references/`，减少 Agent 默认上下文。
 
 ## License
 

@@ -1,71 +1,128 @@
 #!/usr/bin/env python3
-"""架构一致性校验 —— 改/优化代码后跑它,确认没漂移。
+"""Compare the development checkout with one installed runtime copy."""
 
-查三类一致性:
-  A. skills ↔ langlobal   每个项目: 运行单元(skills) 与 开发仓(langlobal) 同步
-  B. wechat ↔ wecom        跨项目 vendored 文件(read_doc/crypto_backend)两份一致
-退出码 0=全一致 / 1=有漂移(列出文件)。挂 git pre-commit 可强制。
-
-用法: python3 check_consistency.py
-"""
+import argparse
 import hashlib
 import os
-import sys
-
-H = os.path.expanduser("~")
-SK_WX = f"{H}/.claude/skills/wechat-decrypt"
-LG_WX = f"{H}/Desktop/Langlobal/wechat-decrypt"
-SK_WC = f"{H}/.claude/skills/wecom-agent"
-LG_WC = f"{H}/Desktop/Langlobal/wecom-agent"
-
-SRC_EXT = (".py", ".md", ".sh", ".ps1", ".js", ".toml")
-SKIP_DIR = (".git", "__pycache__", ".pytest_cache", "decrypted", "export", ".venv")
-SKIP_FILE = {"key.txt", "key_windows.txt", "contacts.json", "all_keys.json", "wxwork_keys.json"}
-
-drift = []
+from pathlib import Path
 
 
-def md5(p):
-    try:
-        return hashlib.md5(open(p, "rb").read()).hexdigest()
-    except OSError:
-        return None
+REPO_DIR = Path(__file__).resolve().parents[1]
+SOURCE_EXTENSIONS = {".py", ".md", ".sh", ".ps1", ".js", ".yaml"}
+RUNTIME_TOP_LEVEL = {
+    "LICENSE",
+    "README.md",
+    "README_ZH.md",
+    "SKILL.md",
+    "config.py",
+    "contacts.py",
+    "crypto.py",
+    "db.py",
+    "message.py",
+    "server.py",
+    "setup.ps1",
+    "setup.sh",
+}
+RUNTIME_DIRECTORIES = (
+    "agents",
+    "references",
+    "scripts/common",
+    "scripts/macos",
+    "scripts/windows",
+)
 
 
-def check_sync(sk, lg, label):
-    """遍历 skills 源文件, 比对 langlobal 同名(自动覆盖新增文件)。"""
-    if not os.path.isdir(sk) or not os.path.isdir(lg):
-        drift.append(f"[{label}] 目录缺失: {sk if not os.path.isdir(sk) else lg}")
-        return
-    for root, dirs, files in os.walk(sk):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIR]
-        for f in files:
-            if not f.endswith(SRC_EXT) or f in SKIP_FILE:
-                continue
-            rel = os.path.relpath(os.path.join(root, f), sk)
-            a, b = os.path.join(sk, rel), os.path.join(lg, rel)
-            if md5(a) != md5(b):
-                drift.append(f"[{label}] {rel}" + ("" if os.path.exists(b) else "  (langlobal 缺)"))
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def check_vendored(a, b, name):
-    if md5(a) != md5(b):
-        drift.append(f"[vendored wechat↔wecom] {name}  (两份不一致)")
+def _runtime_files() -> list[Path]:
+    files = [REPO_DIR / name for name in sorted(RUNTIME_TOP_LEVEL)]
+    for directory in RUNTIME_DIRECTORIES:
+        root = REPO_DIR / directory
+        files.extend(
+            path
+            for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix in SOURCE_EXTENSIONS
+            and "__pycache__" not in path.parts
+        )
+    return sorted(files)
 
 
-# A. skills ↔ langlobal (两项目各一遍)
-check_sync(SK_WX, LG_WX, "wechat skills↔langlobal")
-check_sync(SK_WC, LG_WC, "wecom skills↔langlobal")
+def _default_skill_dir() -> Path | None:
+    candidates = []
+    if os.environ.get("WECHAT_SKILL_DIR"):
+        candidates.append(Path(os.environ["WECHAT_SKILL_DIR"]).expanduser())
+    candidates.extend(
+        [
+            Path("~/.agents/skills/wechat-decrypt").expanduser(),
+            Path("~/.codex/skills/wechat-decrypt").expanduser(),
+            Path("~/.claude/skills/wechat-decrypt").expanduser(),
+        ]
+    )
+    return next((path for path in candidates if path.is_dir()), None)
 
-# B. wechat ↔ wecom vendored (跨项目共享文件)
-check_vendored(f"{SK_WX}/scripts/common/read_doc.py", f"{SK_WC}/decrypt/read_doc.py", "read_doc.py")
-check_vendored(f"{SK_WX}/scripts/common/crypto_backend.py", f"{SK_WC}/decrypt/crypto_backend.py", "crypto_backend.py")
-check_vendored(f"{SK_WX}/e2e/check_consistency.py", f"{SK_WC}/decrypt/e2e/check_consistency.py", "check_consistency.py")
 
-if drift:
-    print(f"⚠️ 架构漂移 {len(drift)} 处:")
-    for d in drift:
-        print("  " + d)
-    print("\n修复: 同步漂移文件(skills↔langlobal 用 cp; vendored 改完两边各放一份)。")
-    sys.exit(1)
-print("✓ 一致性全部通过 (skills↔langlobal 同步 + wechat↔wecom vendored 一致)")
+def check_runtime(skill_dir: Path) -> list[str]:
+    drift = []
+    for source in _runtime_files():
+        relative = source.relative_to(REPO_DIR)
+        target = skill_dir / relative
+        if not target.is_file():
+            drift.append(f"missing: {relative}")
+        elif _digest(source) != _digest(target):
+            drift.append(f"different: {relative}")
+    return drift
+
+
+def check_vendored(wecom_repo: Path) -> list[str]:
+    pairs = (
+        (REPO_DIR / "scripts/common/read_doc.py", wecom_repo / "decrypt/read_doc.py"),
+        (REPO_DIR / "scripts/common/crypto_backend.py", wecom_repo / "decrypt/crypto_backend.py"),
+    )
+    drift = []
+    for left, right in pairs:
+        if not right.is_file():
+            drift.append(f"vendored target missing: {right}")
+        elif _digest(left) != _digest(right):
+            drift.append(f"vendored different: {left.name}")
+    return drift
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--skill-dir", type=Path, help="Installed wechat-decrypt directory")
+    parser.add_argument(
+        "--with-vendored",
+        action="store_true",
+        help="Also compare shared files with the sibling wecom-agent repository",
+    )
+    parser.add_argument("--wecom-repo", type=Path, help="Override the wecom-agent checkout")
+    args = parser.parse_args()
+
+    skill_dir = args.skill_dir.expanduser().resolve() if args.skill_dir else _default_skill_dir()
+    if skill_dir is None or not skill_dir.is_dir():
+        print("FAIL: no installed skill found; pass --skill-dir or set WECHAT_SKILL_DIR")
+        return 1
+
+    drift = check_runtime(skill_dir)
+    if args.with_vendored:
+        wecom_repo = (
+            args.wecom_repo.expanduser().resolve()
+            if args.wecom_repo
+            else Path(os.environ.get("WECOM_REPO", REPO_DIR.parent / "wecom-agent")).expanduser()
+        )
+        drift.extend(check_vendored(wecom_repo))
+
+    if drift:
+        print(f"FAIL: {len(drift)} consistency gap(s) against {skill_dir}")
+        for item in drift:
+            print(f"  {item}")
+        return 1
+    print(f"OK: {len(_runtime_files())} runtime files match {skill_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

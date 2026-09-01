@@ -22,11 +22,13 @@ def decrypted_dir(tmp_path):
     m.execute("INSERT INTO Name2Id (user_name) VALUES (?);", (SAMPLE_WXID,))
     m.execute(
         f"CREATE TABLE {SAMPLE_TABLE} "
-        "(local_id INTEGER, server_id INTEGER, local_type INTEGER, message_content TEXT);"
+        "(local_id INTEGER, server_id INTEGER, create_time INTEGER, local_type INTEGER, "
+        "real_sender_id INTEGER, message_content TEXT);"
     )
     m.execute(
-        f"INSERT INTO {SAMPLE_TABLE} (local_id, server_id, local_type, message_content) "
-        "VALUES (1, 1001, 1, 'hello'), (2, 1002, 34, '');"
+        f"INSERT INTO {SAMPLE_TABLE} "
+        "(local_id, server_id, create_time, local_type, real_sender_id, message_content) "
+        "VALUES (1, 1001, 1, 1, 2, 'hello'), (2, 1002, 2, 34, 2, '');"
     )
     m.commit(); m.close()
 
@@ -56,6 +58,5 @@ def win_backend(monkeypatch, decrypted_dir):
     monkeypatch.setattr(config, "DB_BACKEND", "sqlite3", raising=False)
     monkeypatch.setattr(config, "DECRYPTED_DIR", decrypted_dir, raising=False)
     import db
-    db._contact_db_path = None
-    db._media_db_path = None
+    db.reset_caches()
     return decrypted_dir

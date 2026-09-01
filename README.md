@@ -1,57 +1,120 @@
 # wechat-decrypt
 
+[![tests](https://github.com/tzwkb/wechat-decrypt/actions/workflows/tests.yml/badge.svg)](https://github.com/tzwkb/wechat-decrypt/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Agent Skill](https://img.shields.io/badge/Agent%20Skill-Codex-blue.svg)](SKILL.md)
-[![Python](https://img.shields.io/badge/Python-3.x-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
 English | [中文](README_ZH.md)
 
-## Overview
+A local-first [Codex Skill](https://developers.openai.com/codex/skills) for reading, searching, summarizing, exporting, and transcribing WeChat 4.x history on macOS and Windows. The command-line core also works without MCP; the bundled server provides an optional [Codex MCP](https://developers.openai.com/codex/mcp) facade.
 
- WeChat 4.x chat decrypt, query, export, and voice transcription Agent Skill for verified macOS/Windows workflows with MCP access.
+Use it only with local data you own or are authorized to access.
 
-## Key Capabilities
+## What it does
 
-- Decrypts local WeChat databases.
-- Provides chat, contact, full-text search, and export capabilities.
-- Can expose query tools through MCP.
+- Lists chats and resolves contact remarks, nicknames, aliases, and group names.
+- Reads, searches, summarizes, and measures messages across multiple database shards.
+- Classifies pats, recalls, group/friend changes, red packets, payments, calls, pins, and unknown system events.
+- Exports a contact and date range without an artificial message-count cap.
+- Transcribes locally downloaded SILK voice messages with Whisper.
+- Diagnoses the installation without exposing raw keys.
+- Supports verified macOS and Windows key/decryption flows.
 
-## Usage
-
- Follow the platform-specific README/SKILL.md flow to extract keys, decrypt databases, and start query tools.
-
-## Notes
-
- Use only for local data the user is authorized to access.
-
-## Command and Configuration Reference
-
-The following code blocks keep commands, paths, filenames, and configuration keys literal; explanatory comments are translated for the English README.
-
+```text
+macOS:  encrypted WeChat DB ── raw key ── SQLCipher read-only ─┐
+                                                               ├─ query.py ── CLI / MCP
+Windows: encrypted WeChat DB ── raw key ── private plaintext ──┘             └─ export / voice
 ```
-WeChat → WCDB encryption layer
-         │
-         ├── macOS:  CCKeyDerivationPBKDF → Frida hook → raw key
-         │
-         └── Windows: SQLCipher (statically linked) → wechat-dump-rs → raw key
-                                                                    │
-                                              PBKDF2(raw_key, salt, 256000)
-                                                                    │
-                                              sqlcipher (kdf_iter=1) ─┬─ MCP Server (browse/search)
-                                                                      │
-                                                                      └─ export_chat.py (export + voice transcription)
-```
+
+## Quick start
+
+Clone the repository, then run the setup script from its root.
+
+### macOS
 
 ```bash
-bash setup.sh               # one-click macOS install
-# or
-powershell -File setup.ps1  # Windows
-
-# extract key → write key.txt → restart Claude Code
+bash setup.sh
+.venv/bin/python scripts/common/doctor.py --json
 ```
+
+Setup creates an isolated `.venv`, installs SQLCipher and Python dependencies, links the checkout at `$HOME/.agents/skills/wechat-decrypt`, and registers the `wechat` stdio MCP server with Codex.
+
+First-time key extraction requires temporary ad-hoc signing:
 
 ```bash
-python3 scripts/common/export_chat.py 张三 --year 2026 -o ~/Desktop/out.txt
-python3 scripts/common/export_chat.py 张三 --start 2026-01-01 --end 2026-06-03
-python3 scripts/common/export_chat.py 张三 --year 2026 --transcribe   # transcribe voice messages
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+bash scripts/macos/extract_key.sh
 ```
+
+The script closes WeChat, opens it through Frida, and waits for QR login. After the key is captured, reinstall WeChat from the App Store or official site to restore Tencent's signature. See [the macOS guide](references/macos.md) before extracting.
+
+### Windows
+
+```powershell
+powershell -File setup.ps1
+$Python = ".\.venv\Scripts\python.exe"
+& $Python scripts\windows\extract_raw_key.py
+& $Python scripts\windows\decrypt_all.py
+& $Python scripts\common\doctor.py --json
+```
+
+The extractor closes WeChat and asks you to restart it manually from the visible desktop. `decrypt_all.py` then creates a private local plaintext mirror used by the read-only query layer. See [the Windows guide](references/windows.md).
+
+## Query
+
+Agents should prefer `--json`; omit it for human-readable output.
+
+```bash
+.venv/bin/python scripts/common/query.py list --json
+.venv/bin/python scripts/common/query.py read "Alice" -d 7 -n 50 --json
+.venv/bin/python scripts/common/query.py search "deadline" -d 30 -n 50 --json
+.venv/bin/python scripts/common/query.py recent -d 3 -n 100 --json
+.venv/bin/python scripts/common/query.py summary -d 3 --json
+.venv/bin/python scripts/common/query.py events -e pat -d 30 -n 100 --json
+```
+
+Stable event filters are `pat`, `recall`, `group_join`, `group_remove`, `group_leave`, `group_rename`, `group_notice`, `group_admin`, `group_owner`, `group_disband`, `friend_added`, `red_packet`, `payment`, `call`, `chat_pinned`, and `system`. Chinese labels are also accepted.
+
+The MCP server exposes the same core operations:
+
+| Tool | Purpose |
+|---|---|
+| `wechat_list_chats` | List conversations |
+| `wechat_read_chat` | Read one contact or group |
+| `wechat_search_messages` | Full-text search |
+| `wechat_recent_messages` | Review recent activity |
+| `wechat_chat_summary` | Structured recent-chat context |
+| `wechat_system_events` | Pats, recalls, group/friend changes, payments, calls, pins, and unknown events |
+
+## Export and voice
+
+```bash
+.venv/bin/python scripts/common/export_chat.py "Alice" --year 2026 -o ~/Desktop/alice-2026.txt
+.venv/bin/python scripts/common/export_chat.py "Alice" --start 2026-01-01 --end 2026-06-30
+```
+
+If the platform's Whisper large-v3 model is already cached, voice transcription is automatic. Otherwise ordinary export leaves `[Audio]` and does not download a model. Use `--transcribe` only after approving the approximately 3 GB first download, or `--no-transcribe` to disable transcription. See [the export and transcription guide](references/export-transcription.md).
+
+## Security model
+
+- Query backends open databases read-only; SQLite writes are blocked with `query_only`.
+- Raw keys are validated, stored with private permissions, ignored by Git, and never echoed by extractors or diagnostics.
+- Plaintext databases, exports, derived-key caches, and voice caches use private permissions where supported.
+- The project does not upload chat data or use a cloud transcription service.
+- `key.txt`, `key_windows.txt`, `decrypted/`, `all_keys.json`, `contacts.json`, and `voice_cache.json` must never be committed.
+
+## Development
+
+Unit tests use synthetic databases and require no personal WeChat data:
+
+```bash
+python3 -m pytest -q
+python3 -m compileall -q config.py contacts.py crypto.py db.py message.py server.py scripts/common scripts/windows
+bash -n setup.sh scripts/macos/extract_key.sh
+```
+
+Real-data checks are documented in [e2e/README.md](e2e/README.md). The Skill entrypoint is [SKILL.md](SKILL.md); platform and export details live under `references/` to keep agent context small.
+
+## License
+
+MIT

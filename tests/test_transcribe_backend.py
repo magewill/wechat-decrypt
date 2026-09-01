@@ -1,4 +1,7 @@
 import sys
+import json
+import os
+import stat
 import types
 
 
@@ -35,3 +38,14 @@ def test_fetch_blobs_handles_int_ids(win_backend):
     import transcribe_db
     out = transcribe_db._fetch_blobs([1002])   # native int, like real Windows query output
     assert "1002" in out                        # str-keyed, blob fetched without TypeError
+
+
+def test_voice_cache_is_private(monkeypatch, tmp_path):
+    import transcribe_db
+    path = tmp_path / "voice_cache.json"
+    monkeypatch.setattr(transcribe_db, "VOICE_CACHE", str(path))
+    monkeypatch.setattr(transcribe_db, "SKILL_DIR", str(tmp_path))
+    transcribe_db._save_voice_cache({"1": "你好"})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"1": "你好"}
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600

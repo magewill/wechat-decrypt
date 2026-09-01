@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import html
+import platform
 from datetime import datetime, timedelta
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,17 +45,33 @@ except ImportError:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-WHISPER_MODEL_DIR = os.path.expanduser(
-    "~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-mlx"
-)
+
+def _hf_hub_cache() -> str:
+    if os.environ.get("HF_HUB_CACHE"):
+        return os.path.expanduser(os.environ["HF_HUB_CACHE"])
+    if os.environ.get("HF_HOME"):
+        return os.path.join(os.path.expanduser(os.environ["HF_HOME"]), "hub")
+    return os.path.expanduser("~/.cache/huggingface/hub")
 
 
-def model_cached() -> bool:
-    """True if whisper is ready (mac: mlx model cached; else faster-whisper downloads on demand)."""
-    import platform
-    if platform.system() != "Darwin":
-        return True
-    return os.path.isdir(WHISPER_MODEL_DIR)
+def model_cached(system: str | None = None) -> bool:
+    """Return whether the platform's large-v3 model is already local."""
+    system = system or platform.system()
+    folder = (
+        "models--mlx-community--whisper-large-v3-mlx"
+        if system == "Darwin"
+        else "models--Systran--faster-whisper-large-v3"
+    )
+    return os.path.isdir(os.path.join(_hf_hub_cache(), folder))
+
+
+def _open_private_text(path: str):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 # Type 49 subtype labels (fallback for unknown subtypes)
@@ -123,8 +140,13 @@ def _decode_msg(hex_str: str) -> str:
     raw = bytes.fromhex(hex_str)
     compressed = raw[:4] == b'\x28\xb5\x2f\xfd'
     if compressed:
-        raw = _decompress(raw)
-    text = raw.decode("utf-8", errors="replace")
+        try:
+            raw = _decompress(raw)
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            text = message.extract_text_from_blob(raw)
+    else:
+        text = raw.decode("utf-8", errors="replace")
     # Strip sender prefix:
     #   compressed: "wxid_xxx:\n<content>"  (colon + newline)
     #   group plain: "wxid_xxx: <content>"  (colon + space)
@@ -170,7 +192,16 @@ def format_row(row, voice_map=None, is_group=False, my_name="我", peer_name="�
         direction = f"[{peer_name}]"
 
     if type_key in ("10000", "10002"):
-        return f"[{ts}] [系统] {message.MSG_TYPES.get(type_key, '其他')}"
+        try:
+            content = _decode_msg(hex_str)
+        except Exception:
+            content = ""
+        system = message.parse_system_message(
+            content,
+            default_event="recall" if type_key == "10002" else "",
+        )
+        suffix = f" {system['text']}" if system["text"] else ""
+        return f"[{ts}] [系统·{system['label']}]{suffix}"
     if type_key == "3":
         return f"[{ts}] {direction} [Image]"
     if type_key == "43":
@@ -252,7 +283,7 @@ def main():
             "⚠️  zstd 不可用：压缩消息（引用/链接/部分文本）将全部退化为 [Link]。\n"
             f"    当前解释器: {sys.executable}\n"
             "    安装依赖：\n"
-            "      /opt/homebrew/bin/python3 -m pip install --break-system-packages zstd",
+            f"      {sys.executable} -m pip install zstandard",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -330,7 +361,7 @@ def main():
             label = "all"
         out = os.path.expanduser(f"~/Desktop/{slug}_{label}.txt")
 
-    with open(out, "w", encoding="utf-8") as f:
+    with _open_private_text(out) as f:
         f.write(f"=== 与 {display} 的对话 ===\n")
         f.write(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"消息范围: {start_dt.strftime('%Y-%m-%d')} ~ {(end_dt - timedelta(days=1)).strftime('%Y-%m-%d')}\n")

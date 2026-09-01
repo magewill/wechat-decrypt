@@ -1,7 +1,7 @@
 [project]
 name = "wechat-mcp-server"
 version = "0.1.0"
-description = "MCP server for reading and analyzing WeChat chat history on macOS"
+description = "Read-only MCP server for local WeChat 4.x history on macOS and Windows"
 requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.0.0",

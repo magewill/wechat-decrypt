@@ -8,7 +8,7 @@ encrypted store directly. Preserves the {wxid}_{device}/db_storage/... layout th
 Pure pycryptodome (the VM has no `cryptography`). Usage: python decrypt_all.py [raw_key_hex]
 (raw key defaults to ../../key_windows.txt).
 """
-import sys, os, glob, hashlib
+import sys, os, glob, hashlib, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
 from crypto_backend import aes_cbc_decrypt as _aes_cbc_dec
@@ -20,7 +20,8 @@ PAGE, RESERVE, SALT_SZ = 4096, 80, 16
 
 def decrypt_db(raw: bytes, src: str, dst: str) -> bool:
     """Decrypt one SQLCipher v4 db to plaintext sqlite. Returns False if key/format mismatch."""
-    data = open(src, "rb").read()
+    with open(src, "rb") as f:
+        data = f.read()
     if len(data) < PAGE or len(data) % PAGE:
         return False
     salt = data[:SALT_SZ]
@@ -37,8 +38,27 @@ def decrypt_db(raw: bytes, src: str, dst: str) -> bool:
         page = data[i * PAGE:(i + 1) * PAGE]
         iv = page[rstart:rstart + 16]
         out += _aes_cbc_dec(enc, iv, page[:rstart]) + page[rstart:]
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    open(dst, "wb").write(out)
+    parent = os.path.dirname(dst)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    fd, tmp_path = tempfile.mkstemp(prefix=os.path.basename(dst) + ".", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(out)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, dst)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return True
 
 
@@ -46,8 +66,18 @@ def main():
     if len(sys.argv) > 1:
         raw_hex = sys.argv[1].strip()
     else:
-        raw_hex = open(os.path.join(SKILL_DIR, "key_windows.txt")).read().strip()
-    raw = bytes.fromhex(raw_hex)
+        key_path = os.path.join(SKILL_DIR, "key_windows.txt")
+        try:
+            with open(key_path, encoding="ascii") as f:
+                raw_hex = f.read().strip()
+        except OSError as exc:
+            raise SystemExit(f"ERR: missing {key_path}; run extract_raw_key.py first") from exc
+    try:
+        raw = bytes.fromhex(raw_hex)
+    except ValueError as exc:
+        raise SystemExit("ERR: raw key must be hexadecimal") from exc
+    if len(raw) != 32 or len(raw_hex) != 64:
+        raise SystemExit("ERR: raw key must be exactly 64 hexadecimal characters")
 
     src_roots = glob.glob(os.path.expanduser(r"~/Documents/xwechat_files/*/db_storage"))
     if not src_roots:
@@ -70,6 +100,8 @@ def main():
     print(f"\n{ok} decrypted, {skip} skipped -> {dst_root}")
     if ok:
         print(">>> plaintext store ready; server.py / export_chat.py can now read it <<<")
+    else:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

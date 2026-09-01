@@ -14,8 +14,9 @@ import query  # noqa: E402
 mcp = FastMCP(
     "wechat",
     instructions=(
-        "WeChat 聊天记录读取与分析工具。列出会话、读取消息、搜索关键词、最近动态、结构化摘要。\n"
-        "消息中 [我] 表示用户自己发的，[对方] 表示联系人发的。"
+        "只读访问用户本机已授权的 WeChat 聊天记录。按请求限制日期和条数，不暴露密钥或明文库；"
+        "联系人匹配含糊时让用户选择。支持普通消息以及拍一拍、撤回、群变更、红包/转账、通话等系统事件。\n"
+        "[我] 表示用户自己发的，[对方] 表示联系人发的。"
     ),
 )
 
@@ -40,7 +41,7 @@ def wechat_recent_messages(days: int = 3, limit: int = 100) -> str:
 
 @mcp.tool()
 def wechat_search_messages(keyword: str, days: int = 30, limit: int = 50) -> str:
-    """全文搜索包含关键词的消息。"""
+    """全文搜索包含关键词的普通消息和系统事件。"""
     return query._human("search", query.search(keyword, days, limit))
 
 
@@ -48,6 +49,12 @@ def wechat_search_messages(keyword: str, days: int = 30, limit: int = 50) -> str
 def wechat_chat_summary(days: int = 3) -> str:
     """最近聊天的结构化摘要,供分析待办/承诺/计划/待回复。"""
     return query._human("summary", query.summary(days))
+
+
+@mcp.tool()
+def wechat_system_events(event: str = "", days: int = 30, limit: int = 100) -> str:
+    """读取拍一拍、撤回、群变更、红包/转账、通话等系统事件。event 可用 pat/recall 等稳定码或中文名称；留空返回全部。"""
+    return query._human("events", query.system_events(event, days, limit))
 
 
 if __name__ == "__main__":

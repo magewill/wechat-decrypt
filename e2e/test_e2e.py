@@ -2,8 +2,8 @@
 """wechat-decrypt 端到端自测 —— 双端(macOS sqlcipher / Windows sqlite3)全功能。
 
 跑法: python test_e2e.py [--full]
-  默认: 平台/key/解密/会话/query 8 子命令(轻量)
-  --full: 额外测 media 导出 + export_chat + 语音转写(慢, 数据依赖)
+  默认: 平台/key/解密/会话/query 子命令(轻量)
+  --full: 额外测 media 导出 + export_chat(慢, 数据依赖)
 
 前提:
   macOS  : 已 extract_key.sh 出 key.txt
@@ -112,20 +112,32 @@ def t_q_summary():
     return rc == 0 and "摘要" in out, "ok"
 
 
-# ── 11. query stats --json ──
+# ── 11. query events --json ──
+def t_q_events_json():
+    out, err, rc = q("events", "-d", "3650", "-n", "5", "--json")
+    d = json.loads(out)
+    shape_ok = all(key in d for key in ("count", "by_event", "events"))
+    event_ok = not d.get("events") or all(
+        item.get("is_system") is True and item.get("event")
+        for item in d["events"]
+    )
+    return rc == 0 and shape_ok and event_ok, f"{d.get('count')} 条系统事件"
+
+
+# ── 12. query stats --json ──
 def t_q_stats_json():
     out, err, rc = q("stats", "-d", "30", "--json")
     d = json.loads(out)
     return rc == 0 and "total" in d and "by_type" in d, f"{d.get('total')} 条, {len(d.get('by_type', []))} 类型"
 
 
-# ── 12. query openfile(找文档, 无则跳过算过) ──
+# ── 13. query openfile(找文档, 无则跳过算过) ──
 def t_q_openfile():
     out, err, rc = q("openfile", "试")
     return rc == 0, (out.split("\n")[0] if out else "无匹配文档(正常)")
 
 
-# ── 13/14. --full: media 导出 + export_chat ──
+# ── 14/15. --full: media 导出 + export_chat ──
 def t_media():
     out, err, rc = q("media", "-o", os.path.join(SKILL, "_test_media"), timeout=300)
     import shutil
@@ -155,7 +167,8 @@ def main():
         ("contact 加载", t_contacts), ("Name2Id 会话", t_name2id),
         ("query list", t_q_list), ("query read", t_q_read), ("query search", t_q_search),
         ("query recent --json", t_q_recent_json), ("query summary", t_q_summary),
-        ("query stats --json", t_q_stats_json), ("query openfile", t_q_openfile),
+        ("query events --json", t_q_events_json), ("query stats --json", t_q_stats_json),
+        ("query openfile", t_q_openfile),
     ]:
         check(name, fn)
     if FULL:

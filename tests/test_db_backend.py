@@ -58,3 +58,20 @@ def test_find_data_dir_missing_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DECRYPTED_DIR", str(tmp_path / "empty"), raising=False)
     with pytest.raises(FileNotFoundError):
         db.find_data_dir()
+
+
+def test_plaintext_query_never_creates_missing_db(win_backend, tmp_path):
+    import db
+    missing = tmp_path / "missing.db"
+    assert db.test_key("", str(missing)) is False
+    assert not missing.exists()
+
+
+def test_plaintext_query_is_read_only(win_backend):
+    import pytest
+    import db
+    data_dir = db.find_data_dir()
+    msg_db = os.path.join(data_dir, "message", "message_0.db")
+    with pytest.raises(Exception, match="readonly|read-only|query_only"):
+        db.query(msg_db, "DELETE FROM Name2Id;")
+    assert db.query(msg_db, "SELECT count(*) AS n FROM Name2Id;") == [{"n": 1}]

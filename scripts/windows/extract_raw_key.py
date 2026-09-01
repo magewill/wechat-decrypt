@@ -11,13 +11,15 @@ but the HMAC ipad block is the plaintext `key XOR 0x36` at construction time —
 REQUIREMENTS: pip install frida pycryptodome ; WeChat logged in ; run, then USER restarts WeChat
 (SSH/session-0/schtasks-started WeChat is a hollow shell that never opens dbs — must be desktop-launched).
 
-Usage: python extract_raw_key.py [seconds]   -> prints RAW KEY (and K1) on success.
+Usage: python extract_raw_key.py [seconds]   -> writes key_windows.txt on success.
 """
-import frida, sys, time, hashlib, glob, subprocess
+import frida, sys, time, hashlib, glob, os, subprocess
 from Crypto.Cipher import AES
 
 secs = int(sys.argv[1]) if len(sys.argv) > 1 else 90
 sys.stdout.reconfigure(line_buffering=True)  # 远程/CI 实时见进度(建议5: 避免块缓冲憋到退出)
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KEY_FILE = os.path.join(SKILL_DIR, "key_windows.txt")
 
 # --- verification target: any message db's page1 (raw key is account-wide; salt is per-db) ---
 dbs = glob.glob(r"C:\Users\*\Documents\xwechat_files\*\db_storage\message\message_0.db")
@@ -44,12 +46,12 @@ def on_msg(m, d):
         try:
             enc = hashlib.pbkdf2_hmac("sha512", k, salt, 256000, 32)
             if hdr_ok(AES.new(enc, AES.MODE_CBC, iv).decrypt(ct)):
-                found[kh] = "raw"; print("\n*** RAW KEY:", kh, "\n(account-wide; decrypts all dbs)"); return
+                found[kh] = "raw"; print("\n*** RAW KEY captured and verified ***"); return
         except Exception:
             pass
         try:
             if hdr_ok(AES.new(k, AES.MODE_CBC, iv).decrypt(ct)):
-                found[kh] = "k1"; print("*** K1 (this db only):", kh)
+                found[kh] = "k1"; print("*** K1 candidate verified (this db only) ***")
         except Exception:
             pass
     else:
@@ -123,6 +125,22 @@ send("hooked sha512 entry; waiting for startup PBKDF2 (raw key)...");
 s = session.create_script(JS)
 s.on("message", on_msg)
 s.load()
-time.sleep(secs)
+deadline = time.time() + secs
+while time.time() < deadline and not any(v == "raw" for v in found.values()):
+    time.sleep(0.1)
 raws = [k for k, v in found.items() if v == "raw"]
-print("\nDONE. raw key:", raws[0] if raws else "(not captured — ensure WeChat was DESKTOP-restarted)")
+try:
+    session.detach()
+except Exception:
+    pass
+if not raws:
+    print("\nERR: raw key not captured — ensure WeChat was DESKTOP-restarted")
+    sys.exit(1)
+fd = os.open(KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="ascii") as f:
+    f.write(raws[0] + "\n")
+try:
+    os.chmod(KEY_FILE, 0o600)
+except OSError:
+    pass
+print(f"\nDONE. verified key saved to {KEY_FILE}")

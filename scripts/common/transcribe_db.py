@@ -35,11 +35,19 @@ def _load_voice_cache() -> dict[str, str]:
 
 
 def _save_voice_cache(cache: dict[str, str]) -> None:
+    tmp_path = ""
     try:
-        with open(VOICE_CACHE, "w", encoding="utf-8") as f:
+        fd, tmp_path = tempfile.mkstemp(prefix="voice_cache.", dir=SKILL_DIR)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=1)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, VOICE_CACHE)
     except OSError:
-        pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _transcribe_wav(wav: str, lang: str = "zh", model: str = DEFAULT_MODEL) -> str:
@@ -136,7 +144,12 @@ def main():
     payload = json.dumps(m, ensure_ascii=False, indent=2)
     if a.output:
         out_path = os.path.expanduser(a.output)
-        with open(out_path, "w", encoding="utf-8") as f:
+        fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.chmod(out_path, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(payload)
         print(f"完成: {len(m)} 条 -> {out_path}", file=sys.stderr)
     else:

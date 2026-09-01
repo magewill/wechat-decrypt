@@ -1,11 +1,24 @@
 #!/bin/bash
 # One-click WeChat raw key extraction (macOS, Frida 17.x+)
 set -euo pipefail
+umask 077
 SKILL_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 KEY_FILE="$SKILL_DIR/key.txt"
 FRIDA_OUT="$(mktemp -t wechat_frida.XXXXXX)"
+FRIDA_PID=""
+FRIDA="$SKILL_DIR/.venv/bin/frida"
+[ -x "$FRIDA" ] || FRIDA="$(command -v frida || true)"
+if [ -z "$FRIDA" ]; then
+    echo "ERROR: 未找到 frida。先运行 bash setup.sh。"
+    exit 1
+fi
 
-cleanup() { rm -f "$FRIDA_OUT"; }
+cleanup() {
+    if [ -n "$FRIDA_PID" ]; then
+        kill "$FRIDA_PID" 2>/dev/null || true
+    fi
+    rm -f "$FRIDA_OUT"
+}
 trap cleanup EXIT
 
 echo "=== WeChat Key Extraction ==="
@@ -21,7 +34,7 @@ sleep 1
 echo "[2/3] Spawning WeChat via Frida..."
 cd "$SKILL_DIR"
 
-frida -f /Applications/WeChat.app/Contents/MacOS/WeChat -l scripts/macos/hook_pbkdf.js > "$FRIDA_OUT" 2>&1 &
+"$FRIDA" -f /Applications/WeChat.app/Contents/MacOS/WeChat -l scripts/macos/hook_pbkdf.js > "$FRIDA_OUT" 2>&1 &
 FRIDA_PID=$!
 
 # Wait for RAW_KEY= to appear in output (timeout 120s)
@@ -39,25 +52,25 @@ RAW_KEY=$(grep "RAW_KEY=" "$FRIDA_OUT" | head -1 | sed 's/.*RAW_KEY=//' | grep -
 if [ -z "$RAW_KEY" ]; then
     echo "ERROR: Failed to capture key."
     echo "Frida output:"
-    cat "$FRIDA_OUT" | tail -20
+    tail -20 "$FRIDA_OUT"
     echo ""
     echo "Make sure:"
     echo "  1. sudo codesign --force --deep --sign - /Applications/WeChat.app"
     echo "  2. You scanned QR code to log in"
-    kill $FRIDA_PID 2>/dev/null || true
+    kill "$FRIDA_PID" 2>/dev/null || true
+    FRIDA_PID=""
     exit 1
 fi
 
-kill $FRIDA_PID 2>/dev/null || true
-echo "$RAW_KEY" > "$KEY_FILE"
+kill "$FRIDA_PID" 2>/dev/null || true
+FRIDA_PID=""
+printf '%s\n' "$RAW_KEY" > "$KEY_FILE"
+chmod 600 "$KEY_FILE"
 echo "Done! Key saved to $KEY_FILE ($(wc -c < "$KEY_FILE" | tr -d ' ') bytes)."
 echo ""
 echo "⚠️  重要：提取用的 adhoc 重签名已破坏微信原始签名，"
 echo "    会导致截图/数据访问反复弹出权限确认框。"
 echo "    密钥已保存，日常查消息只读数据库、无需重签名。"
-echo "    建议现在重装微信恢复腾讯原始签名（聊天记录在独立容器目录，不受影响）："
+echo "    建议现在从 App Store 或微信官网重装微信，恢复腾讯原始签名。"
 echo ""
-echo "      rm -rf /Applications/WeChat.app"
-echo "      # 然后从 App Store 或 https://mac.weixin.qq.com 重新安装"
-echo ""
-echo "Restart Claude Code for MCP to take effect."
+echo "Restart Codex for MCP to take effect."
