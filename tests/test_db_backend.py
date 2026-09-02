@@ -1,4 +1,23 @@
 import os
+import sys
+
+
+def test_csv_field_size_limit_falls_back(monkeypatch):
+    import db
+
+    calls = []
+
+    def _field_size_limit(limit):
+        calls.append(limit)
+        if limit > 2_147_483_647:
+            raise OverflowError
+        return limit
+
+    monkeypatch.setattr(db.csv, "field_size_limit", _field_size_limit)
+    selected = db._set_csv_field_size_limit()
+    assert calls[0] == sys.maxsize
+    assert selected <= 2_147_483_647
+    assert calls[-1] == selected
 
 
 def test_query_reads_plaintext(win_backend):

@@ -5,13 +5,13 @@ WeChat VoiceInfo.voice_data is standard #!SILK_V3 prefixed with one 0x02 byte.
 import os
 import tempfile
 
-import pilk
-
 _MAGIC = b"#!SILK_V3"
 
 
 def decode_voice_blob(blob: bytes, out_wav: str) -> None:
     """Decode a WeChat voice BLOB to 24kHz mono WAV."""
+    import pilk
+
     if not blob:
         raise ValueError("empty voice blob")
     data = blob[1:] if blob[:1] == b"\x02" else blob

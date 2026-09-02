@@ -12,7 +12,18 @@ import subprocess
 import config
 import crypto
 
-csv.field_size_limit(sys.maxsize)
+
+def _set_csv_field_size_limit() -> int:
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return limit
+        except OverflowError:
+            limit //= 10
+
+
+_set_csv_field_size_limit()
 
 
 def _exec_sqlite3(db_path: str, sql: str) -> list[sqlite3.Row]:

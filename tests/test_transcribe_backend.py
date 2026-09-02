@@ -1,8 +1,25 @@
+import builtins
+import importlib
 import sys
 import json
 import os
 import stat
 import types
+
+
+def test_import_does_not_require_pilk(monkeypatch):
+    original_import = builtins.__import__
+
+    def _import(name, *args, **kwargs):
+        if name == "pilk":
+            raise ModuleNotFoundError("No module named 'pilk'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+    sys.modules.pop("transcribe_db", None)
+    sys.modules.pop("voice_decode", None)
+    module = importlib.import_module("transcribe_db")
+    assert callable(module.transcribe_server_ids)
 
 
 def test_macos_uses_mlx(monkeypatch):
