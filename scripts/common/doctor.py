@@ -30,6 +30,88 @@ def _has_module(*names: str) -> bool:
     return any(importlib.util.find_spec(name) is not None for name in names)
 
 
+def _voice_backend_check(system: str) -> Check:
+    if system == "Darwin":
+        module = "mlx_whisper"
+        label = "mlx-whisper"
+        fix = "Run: bash setup.sh --with-voice"
+    else:
+        module, label, fix = (
+            "faster_whisper",
+            "faster-whisper",
+            "Run: powershell -File setup.ps1 -WithVoice",
+        )
+    available = _has_module(module)
+    return Check(
+        "voice-backend",
+        "ok" if available else "warn",
+        (
+            f"{label} available"
+            if available
+            else f"{label} not installed; ordinary export still works"
+        ),
+        "" if available else fix,
+    )
+
+
+def _mcp_api_check() -> Check:
+    try:
+        from mcp.server.fastmcp import FastMCP  # noqa: F401
+    except (ImportError, ModuleNotFoundError) as exc:
+        return Check(
+            "dependency:mcp-api",
+            "warn",
+            f"FastMCP v1 API unavailable: {exc}",
+            "Run setup again to install mcp>=1,<2",
+        )
+    return Check("dependency:mcp-api", "ok", "FastMCP v1 API available")
+
+
+def _mac_key_database_check(skill_dir: str, data_dirs: list[str]) -> Check:
+    databases = sorted(
+        database
+        for data_dir in data_dirs
+        for database in glob.glob(
+            os.path.join(data_dir, "message", "message_[0-9].db")
+        )
+        if os.path.isfile(database)
+    )
+    if not databases:
+        return Check(
+            "key-database",
+            "fail",
+            "No active message database available for key validation",
+            "Open and sign in to WeChat",
+        )
+    probe = (
+        "import crypto,db,sys; "
+        "raise SystemExit(0 if db.test_key(crypto.load_key(), sys.argv[1]) else 1)"
+    )
+    for database in databases:
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", probe, database],
+                cwd=skill_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=12,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return Check(
+                "key-database",
+                "ok",
+                "Current key opens a message database",
+            )
+    return Check(
+        "key-database",
+        "fail",
+        "Current key cannot open any message database",
+        "Read references/macos.md and re-extract the key",
+    )
+
+
 def _read_key(path: str) -> tuple[bool, str]:
     try:
         with open(path, encoding="ascii") as f:
@@ -128,14 +210,24 @@ def collect_checks(system: str | None = None, skill_dir: str = SKILL_DIR) -> lis
         return checks
 
     if not _has_module("mcp"):
-        checks.append(Check("dependency:mcp", "warn", "Python package missing", "Run setup again"))
+        checks.append(
+            Check("dependency:mcp", "warn", "Python package missing", "Run setup again")
+        )
     else:
         checks.append(Check("dependency:mcp", "ok", "Python package available"))
+        checks.append(_mcp_api_check())
 
     if _has_module("zstd", "zstandard", "pyzstd"):
         checks.append(Check("dependency:zstd", "ok", "Message decompressor available"))
     else:
-        checks.append(Check("dependency:zstd", "warn", "Long compressed messages cannot be decoded", "Run setup again"))
+        checks.append(
+            Check(
+                "dependency:zstd",
+                "warn",
+                "Long compressed messages cannot be decoded",
+                "Run setup again",
+            )
+        )
 
     if system == "Darwin":
         sqlcipher = os.environ.get("WECHAT_SQLCIPHER_PATH") or shutil.which("sqlcipher")
@@ -147,13 +239,12 @@ def collect_checks(system: str | None = None, skill_dir: str = SKILL_DIR) -> lis
                 "Install with Homebrew: brew install sqlcipher" if not sqlcipher else "",
             )
         )
-        checks.append(
-            _key_check(
-                os.path.join(skill_dir, "key.txt"),
-                "references/macos.md",
-                check_permissions=os.name != "nt",
-            )
+        key_check = _key_check(
+            os.path.join(skill_dir, "key.txt"),
+            "references/macos.md",
+            check_permissions=os.name != "nt",
         )
+        checks.append(key_check)
         data_glob = os.path.expanduser(
             "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/db_storage"
         )
@@ -166,6 +257,8 @@ def collect_checks(system: str | None = None, skill_dir: str = SKILL_DIR) -> lis
                 "Open and sign in to WeChat" if not data_dirs else "",
             )
         )
+        if key_check.status != "fail" and data_dirs:
+            checks.append(_mac_key_database_check(skill_dir, data_dirs))
         if _has_module("frida"):
             checks.append(Check("dependency:frida", "ok", "Key extraction dependency available"))
         else:
@@ -181,6 +274,7 @@ def collect_checks(system: str | None = None, skill_dir: str = SKILL_DIR) -> lis
                 "Download only after user approval (~3 GB)" if not os.path.isdir(model_dir) else "",
             )
         )
+        checks.append(_voice_backend_check(system))
     else:
         checks.append(
             _key_check(
@@ -190,7 +284,7 @@ def collect_checks(system: str | None = None, skill_dir: str = SKILL_DIR) -> lis
             )
         )
         decrypted = glob.glob(
-            os.path.join(skill_dir, "decrypted", "**", "message", "message_0.db"),
+            os.path.join(skill_dir, "decrypted", "**", "message", "message_[0-9].db"),
             recursive=True,
         )
         checks.append(
@@ -227,6 +321,7 @@ def collect_checks(system: str | None = None, skill_dir: str = SKILL_DIR) -> lis
                 "Download only after user approval (~3 GB)" if not os.path.isdir(model_dir) else "",
             )
         )
+        checks.append(_voice_backend_check(system))
 
     return checks
 

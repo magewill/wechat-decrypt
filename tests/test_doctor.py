@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 
 DOCTOR_PATH = Path(__file__).parents[1] / "scripts" / "common" / "doctor.py"
@@ -41,3 +42,37 @@ def test_unsupported_platform_stops_platform_checks(monkeypatch, tmp_path):
     checks = doctor.collect_checks(system="Linux", skill_dir=str(tmp_path))
     assert [item.name for item in checks] == ["platform", "python", "skill", "mcp"]
     assert checks[0].status == "fail"
+
+
+def test_voice_backend_is_optional_and_platform_specific(monkeypatch):
+    monkeypatch.setattr(doctor, "_has_module", lambda name: name == "mlx_whisper")
+
+    mac = doctor._voice_backend_check("Darwin")
+    windows = doctor._voice_backend_check("Windows")
+
+    assert mac.status == "ok"
+    assert "mlx-whisper" in mac.detail
+    assert windows.status == "warn"
+    assert "-WithVoice" in windows.fix
+
+
+def test_mac_key_database_check_accepts_one_readable_database(monkeypatch, tmp_path):
+    data_dir = tmp_path / "account" / "db_storage"
+    message_dir = data_dir / "message"
+    message_dir.mkdir(parents=True)
+    (message_dir / "message_3.db").write_bytes(b"database")
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+
+    check = doctor._mac_key_database_check(str(tmp_path), [str(data_dir)])
+
+    assert check.status == "ok"
+
+
+def test_mac_key_database_check_fails_without_message_database(tmp_path):
+    check = doctor._mac_key_database_check(str(tmp_path), [str(tmp_path)])
+
+    assert check.status == "fail"

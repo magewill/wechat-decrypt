@@ -10,7 +10,11 @@ From the skill checkout:
 bash setup.sh
 ```
 
-Setup creates `.venv`, installs dependencies, safely links the checkout at `$HOME/.agents/skills/wechat-decrypt`, and registers the `wechat` stdio MCP server with Codex. It does not replace an existing user-skill path.
+Setup creates `.venv`, installs dependencies, safely links the checkout at `$HOME/.agents/skills/wechat-decrypt`, migrates missing private files from the legacy `$HOME/.codex/skills/wechat-decrypt` copy, and registers the `wechat` stdio MCP server with Codex. It never overwrites a private file.
+
+Ordinary setup omits the sizeable voice stack. Install it only for transcription with `bash setup.sh --with-voice`; this does not download the model.
+
+If the user-skill path already points to another checkout, ordinary setup stops. Inspect that checkout, then explicitly switch with `bash setup.sh --upgrade`; setup moves the previous path to a timestamped backup before linking the current checkout. A failed private-state migration restores the prior link.
 
 Run the diagnostic with the venv Python. A missing key is expected before first extraction.
 

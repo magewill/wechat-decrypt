@@ -17,10 +17,11 @@ Omitting dates exports all available history. The exporter merges message shards
 
 ## Voice model consent
 
-Check `voice-model` in `doctor.py --json` before any export that may include audio.
+Check both `voice-backend` and `voice-model` in `doctor.py --json` before any export that may include audio.
 
-- `ok`: transcription may run automatically unless the user asks to preserve `[Audio]`; use `--no-transcribe` to disable it.
-- `warn`: ordinary export leaves `[Audio]` and does not download a model. Ask whether the user wants the approximately 3 GB large-v3 download.
+- Both are `ok`: transcription may run automatically unless the user asks to preserve `[Audio]`; use `--no-transcribe` to disable it.
+- `voice-backend` is `warn`: install the optional local stack with the platform setup flag shown by doctor. This installs sizeable libraries but not the model.
+- `voice-model` is `warn`: ordinary export leaves `[Audio]` and does not download a model. Ask whether the user wants the approximately 3 GB large-v3 download.
 - User approves: rerun with `--transcribe`; the first run downloads the platform model.
 - User declines: use `--no-transcribe`.
 

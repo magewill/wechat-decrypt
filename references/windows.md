@@ -10,7 +10,11 @@ From PowerShell in the skill checkout:
 powershell -File setup.ps1
 ```
 
-Setup creates `.venv`, installs dependencies, safely creates a junction at `$HOME\.agents\skills\wechat-decrypt`, and registers the `wechat` stdio MCP server with Codex. It does not replace an existing user-skill path.
+Setup creates `.venv`, installs dependencies, safely creates a junction at `$HOME\.agents\skills\wechat-decrypt`, migrates missing private files from the legacy `$HOME\.codex\skills\wechat-decrypt` copy, and registers the `wechat` stdio MCP server with Codex. It never overwrites a private file or duplicates an existing plaintext mirror.
+
+Ordinary setup omits the sizeable voice stack. Install it only for transcription with `powershell -File setup.ps1 -WithVoice`; this does not download the model.
+
+If the user-skill path already points to another checkout, ordinary setup stops. Inspect it, then explicitly switch with `powershell -File setup.ps1 -Upgrade`; setup retains the old path as a timestamped backup and links an existing `decrypted\` directory instead of copying it. A failed private-state migration restores the prior junction.
 
 ```powershell
 $Python = ".\.venv\Scripts\python.exe"

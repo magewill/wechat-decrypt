@@ -69,6 +69,21 @@ def test_get_my_wxid_strips_device_suffix(win_backend):
     assert db.get_my_wxid() == "wxid_test001"
 
 
+def test_decrypted_data_discovery_does_not_require_message_zero(win_backend):
+    import db
+
+    data_dir = db.find_data_dir()
+    message_dir = os.path.join(data_dir, "message")
+    os.rename(
+        os.path.join(message_dir, "message_0.db"),
+        os.path.join(message_dir, "message_3.db"),
+    )
+    db.reset_caches()
+
+    assert db.find_data_dir() == data_dir
+    assert db.get_message_dbs() == [os.path.join(message_dir, "message_3.db")]
+
+
 def test_find_data_dir_missing_raises(monkeypatch, tmp_path):
     import pytest
     import config
@@ -77,6 +92,30 @@ def test_find_data_dir_missing_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DECRYPTED_DIR", str(tmp_path / "empty"), raising=False)
     with pytest.raises(FileNotFoundError):
         db.find_data_dir()
+
+
+def test_encrypted_data_discovery_validates_nonzero_message_shard(monkeypatch, tmp_path):
+    import config
+    import crypto
+    import db
+
+    data_dir = tmp_path / "wxid_device" / "db_storage"
+    message_dir = data_dir / "message"
+    message_dir.mkdir(parents=True)
+    shard = message_dir / "message_4.db"
+    shard.write_bytes(b"encrypted")
+    monkeypatch.setattr(config, "DB_BACKEND", "sqlcipher", raising=False)
+    monkeypatch.setattr(
+        config,
+        "WECHAT_DATA_GLOB",
+        str(tmp_path / "*" / "db_storage"),
+        raising=False,
+    )
+    monkeypatch.setattr(crypto, "load_key", lambda: "11" * 32)
+    monkeypatch.setattr(db, "test_key", lambda _key, path: path == str(shard))
+    db.reset_caches()
+
+    assert db.find_data_dir() == str(data_dir)
 
 
 def test_plaintext_query_never_creates_missing_db(win_backend, tmp_path):

@@ -1,5 +1,6 @@
 """Message formatting, type mapping, and sender detection."""
 from datetime import datetime
+from functools import lru_cache
 import html
 import re
 import xml.etree.ElementTree as ET
@@ -75,6 +76,9 @@ _SYSTEM_EVENT_ALIASES = {
     "通话": "call",
     "置顶": "chat_pinned",
 }
+
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+_SENDER_PREFIX = re.compile(r"^[^\s:]{1,60}:[\n ]")
 
 
 def _extract_xml_system_text(content: str) -> tuple[str, str]:
@@ -173,6 +177,84 @@ def extract_text_from_blob(data: bytes) -> str:
         if printable / len(text) >= 0.85:
             return text
     return ""
+
+
+@lru_cache(maxsize=1)
+def _zstd_decompressors() -> tuple:
+    backends = []
+    try:
+        import zstd
+
+        backends.append(zstd.decompress)
+    except ImportError:
+        pass
+    try:
+        import zstandard
+
+        backends.append(zstandard.ZstdDecompressor().decompress)
+    except ImportError:
+        pass
+    try:
+        import pyzstd
+
+        backends.append(pyzstd.decompress)
+    except ImportError:
+        pass
+
+    return tuple(backends)
+
+
+def _decompress_zstd(data: bytes) -> bytes:
+    backends = _zstd_decompressors()
+
+    error = None
+    for decompress in backends:
+        try:
+            return decompress(data)
+        except Exception as exc:
+            error = exc
+    if error is not None:
+        raise error
+    raise RuntimeError("zstd decompressor is unavailable")
+
+
+def has_zstd_decoder() -> bool:
+    return bool(_zstd_decompressors())
+
+
+def decode_message_content(content: str | bytes | bytearray | None) -> str:
+    """Decode one WeChat message body and remove its group-sender envelope."""
+    compressed = False
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, (bytes, bytearray)):
+        raw = bytes(content)
+        compressed = raw.startswith(_ZSTD_MAGIC)
+        if compressed:
+            try:
+                raw = _decompress_zstd(raw)
+            except Exception:
+                text = extract_text_from_blob(raw)
+            else:
+                text = raw.decode("utf-8", errors="replace")
+        else:
+            text = raw.decode("utf-8", errors="replace")
+    else:
+        text = str(content)
+
+    prefix = _SENDER_PREFIX.match(text)
+    if prefix and (compressed or prefix.group(0).startswith("wxid_")):
+        text = text[prefix.end():]
+    return text
+
+
+def decode_message_hex(value: str | None) -> str:
+    """Decode a hexadecimal ``message_content`` value."""
+    if not value:
+        return ""
+    return decode_message_content(bytes.fromhex(value))
 
 
 _my_sender_id_cache: int | None = None

@@ -12,7 +12,6 @@ import os
 import argparse
 import json
 import re
-import html
 import platform
 from datetime import datetime, timedelta
 
@@ -20,28 +19,9 @@ SKILL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, SKILL_DIR)
 
 import db
+import appmsg
 import contacts
 import message
-
-_ZSTD_OK = True
-try:
-    import zstd as _zstd
-    def _decompress(data: bytes) -> bytes:
-        return _zstd.decompress(data)
-except ImportError:
-    try:
-        import zstandard as _zstandard
-        def _decompress(data: bytes) -> bytes:
-            return _zstandard.ZstdDecompressor().decompress(data)
-    except ImportError:
-        try:
-            import pyzstd as _pyzstd
-            def _decompress(data: bytes) -> bytes:
-                return _pyzstd.decompress(data)
-        except ImportError:
-            _ZSTD_OK = False
-            def _decompress(data: bytes) -> bytes:
-                raise RuntimeError("zstd not available")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -72,19 +52,6 @@ def _open_private_text(path: str):
     except OSError:
         pass
     return os.fdopen(fd, "w", encoding="utf-8")
-
-
-# Type 49 subtype labels (fallback for unknown subtypes)
-_TYPE49_LABELS = {
-    1: "Link", 3: "Music", 4: "Video Link", 5: "File",
-    6: "MiniApp", 8: "Location", 17: "Location (Live)",
-    21: "MiniApp", 33: "MiniApp", 36: "Link",
-}
-
-# Type labels for quoted message types
-_REFER_TYPE_LABELS = {
-    "3": "[Image]", "34": "[Audio]", "43": "[Video]", "47": "[Sticker]",
-}
 
 
 def _get_my_rowid(db_path: str) -> int | None:
@@ -134,47 +101,7 @@ def fetch(table, db_paths, since_dt, until_dt):
 
 
 def _decode_msg(hex_str: str) -> str:
-    """Decode hex message_content: decompress zstd if needed, return UTF-8 string."""
-    if not hex_str:
-        return ""
-    raw = bytes.fromhex(hex_str)
-    compressed = raw[:4] == b'\x28\xb5\x2f\xfd'
-    if compressed:
-        try:
-            raw = _decompress(raw)
-            text = raw.decode("utf-8", errors="replace")
-        except Exception:
-            text = message.extract_text_from_blob(raw)
-    else:
-        text = raw.decode("utf-8", errors="replace")
-    # Strip sender prefix:
-    #   compressed: "wxid_xxx:\n<content>"  (colon + newline)
-    #   group plain: "wxid_xxx: <content>"  (colon + space)
-    # Pattern is always <non-space, no-colon chars>: followed by \n or space
-    m = re.match(r'^[^\s:]{1,60}:[\n ]', text)
-    if m and (compressed or m.group(0).startswith("wxid_")):
-        text = text[m.end():]
-    return text
-
-
-def _extract_refer(xml: str) -> tuple[str, str]:
-    """Return (display_name, content_summary) from a <refermsg> block."""
-    refer_name = re.search(r'<displayname>([^<]+)</displayname>', xml)
-    refer_content = re.search(r'<content>([\s\S]*?)</content>', xml)
-    if not refer_name or not refer_content:
-        return "", ""
-    name = refer_name.group(1).strip()
-    rc_raw = html.unescape(refer_content.group(1)).strip()
-    # If quoted content is itself XML, extract its title
-    inner_title = re.search(r'<title>([^<]+)</title>', rc_raw)
-    if inner_title:
-        return name, inner_title.group(1).strip()
-    # If quoted content is binary/empty, infer from <type> tag
-    refer_type = re.search(r'<type>(\d+)</type>', xml[xml.find("<refermsg>"):])
-    if not rc_raw or rc_raw.startswith("<"):
-        label = _REFER_TYPE_LABELS.get(refer_type.group(1) if refer_type else "", "[Message]")
-        return name, label
-    return name, rc_raw.replace("\n", " ")
+    return message.decode_message_hex(hex_str)
 
 
 def format_row(row, voice_map=None, is_group=False, my_name="我", peer_name="对方"):
@@ -225,24 +152,14 @@ def format_row(row, voice_map=None, is_group=False, my_name="我", peer_name="�
         return f"[{ts}] {direction} [Audio{dur}]"
 
     if type_key == "49":
-        raw_type = int(row.get("local_type", "0") or "0")
-        subtype = raw_type >> 32
         try:
             xml = _decode_msg(hex_str)
-            title = re.search(r'<title>([^<]+)</title>', xml)
-            if subtype == 57:
-                text = title.group(1).strip() if title else ""
-                ref_name, ref_content = _extract_refer(xml)
-                if ref_name:
-                    text += f" [↩ {ref_name}: {ref_content[:60]}]"
-                return f"[{ts}] {direction} {text}" if text else f"[{ts}] {direction} [Quote]"
-            if subtype == 19:
-                return f"[{ts}] {direction} [Chat History]"
-            label_name = _TYPE49_LABELS.get(subtype, "Link")
-            label = f": {title.group(1)[:50]}" if title and title.group(1).strip() else ""
-            return f"[{ts}] {direction} [{label_name}{label}]"
+            parsed = appmsg.parse_app_message(xml, row.get("local_type", ""))
+            details = parsed["summary"].replace("\n", " ")
+            suffix = f" {details}" if details else ""
+            return f"[{ts}] {direction} [{parsed['label']}]{suffix}"
         except Exception:
-            return f"[{ts}] {direction} [Link]"
+            return f"[{ts}] {direction} [分享卡片]"
 
     try:
         text = _decode_msg(hex_str)
@@ -278,7 +195,7 @@ def main():
     parser.add_argument("--voice-map", help="复用已有转写 JSON（server_id→文本），跳过重新转写")
     args = parser.parse_args()
 
-    if not _ZSTD_OK:
+    if not message.has_zstd_decoder():
         print(
             "⚠️  zstd 不可用：压缩消息（引用/链接/部分文本）将全部退化为 [Link]。\n"
             f"    当前解释器: {sys.executable}\n"

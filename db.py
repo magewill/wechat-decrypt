@@ -135,6 +135,10 @@ def _data_dir_signature() -> tuple[str, str]:
     return config.DB_BACKEND, root
 
 
+def _message_db_candidates(data_dir: str) -> list[str]:
+    return sorted(glob.glob(os.path.join(data_dir, "message", "message_[0-9].db")))
+
+
 def find_data_dir() -> str:
     """Find the WeChat db_storage directory (most recent with valid key). Cached per process."""
     global _data_dir_cache
@@ -152,8 +156,7 @@ def find_data_dir() -> str:
         raise FileNotFoundError(f"未找到 WeChat 数据目录: {config.WECHAT_DATA_GLOB}")
     key = crypto.load_key()
     for match in matches:
-        msg_db = os.path.join(match, "message", "message_0.db")
-        if os.path.exists(msg_db) and test_key(key, msg_db):
+        if any(test_key(key, msg_db) for msg_db in _message_db_candidates(match)):
             _data_dir_cache = signature, match
             return match
     _data_dir_cache = signature, matches[0]
@@ -163,16 +166,16 @@ def find_data_dir() -> str:
 def _find_decrypted_data_dir() -> str:
     """Locate the db_storage root inside the decrypted output.
 
-    Assumes layout .../db_storage/message/message_0.db (two levels up from the hit).
-    Picks the most-recent message_0.db and assumes a single account under DECRYPTED_DIR.
+    Assumes layout .../db_storage/message/message_N.db (two levels up from the hit).
+    Picks the account with the most-recent active message shard.
     """
     hits = glob.glob(
-        os.path.join(config.DECRYPTED_DIR, "**", "message", "message_0.db"),
+        os.path.join(config.DECRYPTED_DIR, "**", "message", "message_[0-9].db"),
         recursive=True,
     )
     if not hits:
         raise FileNotFoundError(
-            f"未找到解密后的 message_0.db，先运行 scripts/windows/extract_raw_key.py 提 key，"
+            f"未找到解密后的 message_N.db，先运行 scripts/windows/extract_raw_key.py 提 key，"
             f"再 scripts/windows/decrypt_all.py 解密。查找根: {config.DECRYPTED_DIR}"
         )
     hits.sort(key=os.path.getmtime, reverse=True)
@@ -190,8 +193,7 @@ def get_message_dbs() -> list[str]:
         cached_dir, cached_dbs = _message_dbs_cache
         if cached_dir == data_dir and all(os.path.isfile(path) for path in cached_dbs):
             return cached_dbs
-    pattern = os.path.join(data_dir, "message", "message_[0-9].db")
-    dbs = sorted(glob.glob(pattern))
+    dbs = _message_db_candidates(data_dir)
     if config.DB_BACKEND == "sqlite3":
         valid = [db for db in dbs if test_key("", db)]
     else:

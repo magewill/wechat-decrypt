@@ -24,6 +24,7 @@ On Windows, use the equivalent venv Python path. Interpret `fail` as blocking an
 
 - `key` or `database` failure: read the matching platform reference below.
 - `mcp` warning: use the CLI fallback now; run platform setup only when MCP registration is needed.
+- `voice-backend` warning: ordinary export works; install the optional platform voice stack only for transcription.
 - `voice-model` warning: ordinary export still works. Do not download the model without user approval.
 
 ## Route the request
@@ -36,6 +37,7 @@ On Windows, use the equivalent venv Python path. Interpret `fail` as blocking an
 | Review recent activity | `wechat_recent_messages` |
 | Summarize recent chats and action items | `wechat_chat_summary` |
 | Review pats, recalls, group changes, payments, or calls | `wechat_system_events`; filter with a stable code or Chinese label |
+| Review shared music, videos, Channels, mini programs, files, or links | Use normal read/search/summary tools; inspect the structured `app` object in CLI JSON when exact metadata matters |
 | Statistics, media, or a received document | CLI `stats`, `media`, or `openfile` |
 | Export history or transcribe voice | Read [references/export-transcription.md](references/export-transcription.md) |
 | macOS setup, key failure, or WeChat update | Read [references/macos.md](references/macos.md) |
@@ -61,3 +63,5 @@ MCP is a thin optional facade. If it is unavailable, use the same logic through 
 - Windows first creates a local plaintext mirror under `decrypted/`, then queries it read-only. Treat that mirror as sensitive.
 - WeChat updates may invalidate extraction assumptions or require a new key. Run `doctor.py` before repeating extraction.
 - Voice transcription is offline after the model is cached. A first large-v3 download is about 3 GB and always requires user approval.
+- Type-49 app messages are parsed locally. Preserve their structured `app` metadata when answering questions about titles, creators, sources, URLs, files, mini programs, or Channels; unknown subtypes may still contain useful fields.
+- Setup migrates only missing private files from legacy installs. Switching an existing user-skill link requires the explicit platform upgrade flag and leaves a recoverable backup.

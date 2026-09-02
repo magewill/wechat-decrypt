@@ -15,6 +15,7 @@ Use it only with local data you own or are authorized to access.
 - Lists chats and resolves contact remarks, nicknames, aliases, and group names.
 - Reads, searches, summarizes, and measures messages across multiple database shards.
 - Classifies pats, recalls, group/friend changes, red packets, payments, calls, pins, and unknown system events.
+- Parses music, video links, Channels/live streams, mini programs, files, quotes, and unknown share cards while preserving titles, descriptions, sources, and URLs.
 - Exports a contact and date range without an artificial message-count cap.
 - Transcribes locally downloaded SILK voice messages with Whisper.
 - Diagnoses the installation without exposing raw keys.
@@ -37,7 +38,9 @@ bash setup.sh
 .venv/bin/python scripts/common/doctor.py --json
 ```
 
-Setup creates an isolated `.venv`, installs SQLCipher and Python dependencies, links the checkout at `$HOME/.agents/skills/wechat-decrypt`, and registers the `wechat` stdio MCP server with Codex.
+Setup creates an isolated `.venv`, installs SQLCipher and Python dependencies, links the checkout at `$HOME/.agents/skills/wechat-decrypt`, and registers the `wechat` stdio MCP server with Codex. Missing keys and local caches are migrated from the legacy `$HOME/.codex/skills/wechat-decrypt` copy without overwriting current files. If the user-skill path points to another checkout, inspect it first and then run `bash setup.sh --upgrade`; the previous path is retained as a timestamped backup.
+
+Core setup stays lightweight. Install the optional local voice stack only when needed with `bash setup.sh --with-voice`; this installs sizeable ML libraries but not the approximately 3 GB model.
 
 First-time key extraction requires temporary ad-hoc signing:
 
@@ -60,6 +63,10 @@ $Python = ".\.venv\Scripts\python.exe"
 
 The extractor closes WeChat and asks you to restart it manually from the visible desktop. `decrypt_all.py` then creates a private local plaintext mirror used by the read-only query layer. See [the Windows guide](references/windows.md).
 
+For an existing user-skill junction that points elsewhere, use `powershell -File setup.ps1 -Upgrade`. Private files are copied only when missing; an existing `decrypted/` mirror is linked rather than duplicated.
+
+Install the optional Windows voice stack with `powershell -File setup.ps1 -WithVoice`. Ordinary query and export do not require it.
+
 ## Query
 
 Agents should prefer `--json`; omit it for human-readable output.
@@ -74,6 +81,10 @@ Agents should prefer `--json`; omit it for human-readable output.
 ```
 
 Stable event filters are `pat`, `recall`, `group_join`, `group_remove`, `group_leave`, `group_rename`, `group_notice`, `group_admin`, `group_owner`, `group_disband`, `friend_added`, `red_packet`, `payment`, `call`, `chat_pinned`, and `system`. Chinese labels are also accepted.
+
+Type-49 share cards use the same parser in reads, searches, summaries, statistics, and exports. JSON output adds an `app` object with a stable kind, title, description, source, URL, and music/Channels/mini-program metadata. Unknown subtypes preserve common card fields and remain searchable through their local payload.
+
+Search decodes every compressed-text and type-49 candidate in bounded pages, so results are not limited to a fixed recent-card window. It does not create a persistent plaintext search index.
 
 The MCP server exposes the same core operations:
 
@@ -109,8 +120,9 @@ Unit tests use synthetic databases and require no personal WeChat data:
 
 ```bash
 python3 -m pytest -q
-python3 -m compileall -q config.py contacts.py crypto.py db.py message.py server.py scripts/common scripts/windows
+python3 -m compileall -q appmsg.py config.py contacts.py crypto.py db.py message.py server.py scripts/common scripts/windows
 bash -n setup.sh scripts/macos/extract_key.sh
+.venv/bin/python -c "import asyncio, server; assert len(asyncio.run(server.mcp.list_tools())) == 6"
 ```
 
 Real-data checks are documented in [e2e/README.md](e2e/README.md). The Skill entrypoint is [SKILL.md](SKILL.md); platform and export details live under `references/` to keep agent context small.

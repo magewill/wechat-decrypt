@@ -14,6 +14,7 @@ RUNTIME_TOP_LEVEL = {
     "README.md",
     "README_ZH.md",
     "SKILL.md",
+    "appmsg.py",
     "config.py",
     "contacts.py",
     "crypto.py",

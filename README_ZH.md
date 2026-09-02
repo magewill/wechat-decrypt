@@ -15,6 +15,7 @@
 - 列出会话，解析备注、昵称、微信号和群名。
 - 跨多个数据库分片读取、搜索、总结和统计消息。
 - 识别拍一拍、撤回、群/好友变更、红包、转账、通话、置顶及未知系统事件。
+- 解析音乐、视频链接、视频号/直播、小程序、文件、引用及未知分享卡片，保留标题、描述、来源和 URL。
 - 按联系人和日期范围完整导出，不设人为条数上限。
 - 用 Whisper 转写已经下载到本地的 SILK 语音。
 - 自检安装状态，但不暴露 raw key。
@@ -37,7 +38,9 @@ bash setup.sh
 .venv/bin/python scripts/common/doctor.py --json
 ```
 
-安装脚本会创建隔离的 `.venv`、安装 SQLCipher 与 Python 依赖、把当前仓库链接到 `$HOME/.agents/skills/wechat-decrypt`，并向 Codex 注册 `wechat` stdio MCP。
+安装脚本会创建隔离的 `.venv`、安装 SQLCipher 与 Python 依赖、把当前仓库链接到 `$HOME/.agents/skills/wechat-decrypt`，并向 Codex 注册 `wechat` stdio MCP。旧 `$HOME/.codex/skills/wechat-decrypt` 中缺失的密钥和本地缓存会被迁移，但绝不覆盖当前文件。如果用户 Skill 已指向其他仓库，先检查旧目录，再执行 `bash setup.sh --upgrade`；旧路径会保留为带时间戳的备份。
+
+普通安装保持轻量。仅在需要本地语音转写时执行 `bash setup.sh --with-voice`；它会安装较大的 ML 运行库，但不会下载约 3 GB 的模型。
 
 首次提取密钥需要临时 ad-hoc 重签名：
 
@@ -60,6 +63,10 @@ $Python = ".\.venv\Scripts\python.exe"
 
 提取器会关闭微信，并要求你从可见桌面手动重启。随后 `decrypt_all.py` 创建私有的本地明文镜像，查询层只读访问它。详见 [Windows 指南](references/windows.md)。
 
+已有用户 Skill junction 指向其他目录时，使用 `powershell -File setup.ps1 -Upgrade`。私有文件仅在目标缺失时复制；现有 `decrypted/` 明文镜像会建立目录链接，不重复复制。
+
+Windows 可用 `powershell -File setup.ps1 -WithVoice` 安装可选语音栈；普通查询和导出不依赖它。
+
 ## 查询
 
 Agent 调用建议使用 `--json`；人工调试可省略。
@@ -74,6 +81,10 @@ Agent 调用建议使用 `--json`；人工调试可省略。
 ```
 
 稳定事件码包括 `pat`、`recall`、`group_join`、`group_remove`、`group_leave`、`group_rename`、`group_notice`、`group_admin`、`group_owner`、`group_disband`、`friend_added`、`red_packet`、`payment`、`call`、`chat_pinned` 和 `system`；也可直接使用中文标签筛选。
+
+类型 49 分享卡片会在读取、搜索、摘要、统计和导出中统一解析。JSON 输出额外包含 `app` 字段，提供稳定类型、标题、描述、来源、URL 及音乐/视频号/小程序等专属元数据；未知子类型保留通用卡片字段，原始本地载荷仍可搜索。
+
+搜索会分批解码全部压缩正文及类型 49 候选，不再受“最近若干条卡片”的固定窗口限制，也不会建立持久化明文搜索索引。
 
 MCP 暴露相同核心能力：
 
@@ -109,8 +120,9 @@ MCP 暴露相同核心能力：
 
 ```bash
 python3 -m pytest -q
-python3 -m compileall -q config.py contacts.py crypto.py db.py message.py server.py scripts/common scripts/windows
+python3 -m compileall -q appmsg.py config.py contacts.py crypto.py db.py message.py server.py scripts/common scripts/windows
 bash -n setup.sh scripts/macos/extract_key.sh
+.venv/bin/python -c "import asyncio, server; assert len(asyncio.run(server.mcp.list_tools())) == 6"
 ```
 
 真实数据检查见 [e2e/README.md](e2e/README.md)。Skill 入口是 [SKILL.md](SKILL.md)；平台和导出细节放在 `references/`，减少 Agent 默认上下文。

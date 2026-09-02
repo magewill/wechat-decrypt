@@ -20,6 +20,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # skill 根
 import config  # noqa: E402
+import appmsg  # noqa: E402
 import contacts  # noqa: E402
 import db  # noqa: E402
 import message  # noqa: E402
@@ -38,6 +39,32 @@ def _quoted_identifier(value: str) -> str:
 def _chunks(values: list[str], size: int = 200):
     for start in range(0, len(values), size):
         yield values[start:start + size]
+
+
+def _iter_query_pages(db_path: str, selects: list[str], page_size: int = 500):
+    union = " UNION ALL ".join(selects)
+    offset = 0
+    while True:
+        rows = db.query(
+            db_path,
+            "SELECT * FROM (" + union + ") "
+            "ORDER BY create_time DESC, source_table ASC, local_id DESC, server_id DESC "
+            f"LIMIT {page_size} OFFSET {offset};",
+        )
+        yield from rows
+        if len(rows) < page_size:
+            return
+        offset += page_size
+
+
+def _search_identity(db_path: str, row: dict) -> tuple:
+    return (
+        db_path,
+        row.get("source_table", ""),
+        row.get("local_id"),
+        row.get("server_id"),
+        row.get("create_time"),
+    )
 
 
 def list_chats() -> list[dict]:
@@ -75,35 +102,68 @@ def read_chat(contact: str, limit: int = 50, days: int = 7) -> dict:
 
 def search(keyword: str, days: int = 30, limit: int = 50) -> dict:
     name2id = db.get_name2id()
-    since = int(time.time()) - days * 86400
+    scan_until = int(time.time())
+    since = scan_until - days * 86400
     kw = keyword.replace("'", "''")
     kw_hex = keyword.encode("utf-8").hex().upper()
+    keyword_folded = keyword.casefold()
     hits = []
+    seen = set()
+
+    def append_if_match(db_path: str, row: dict) -> bool:
+        identity = _search_identity(db_path, row)
+        if identity in seen:
+            return False
+        if keyword_folded not in _searchable_text(row).casefold():
+            return False
+        seen.add(identity)
+        table = row.get("source_table", "")
+        formatted = _fmt_msg(row)
+        formatted["contact"] = contacts.resolve_contact_name(name2id.get(table, table))
+        hits.append(formatted)
+        return True
+
     for db_path, tabs in _msg_dbs_tables():
         tables = sorted(t for t in tabs if t.startswith("Msg_"))
         for table_batch in _chunks(tables):
             selects = []
+            fallback_selects = []
             for table in table_batch:
                 source = table.replace("'", "''")
                 selects.append(
-                    f"SELECT '{source}' AS source_table, create_time, local_type, "
+                    f"SELECT '{source}' AS source_table, local_id, server_id, "
+                    f"create_time, local_type, "
                     f"real_sender_id, hex(message_content) AS message_hex "
                     f"FROM {_quoted_identifier(table)} WHERE create_time > {since} "
+                    f"AND create_time <= {scan_until} "
                     f"AND (message_content LIKE '%{kw}%' "
                     f"OR instr(hex(message_content), '{kw_hex}') > 0)"
                 )
+                fallback_selects.append(
+                    f"SELECT '{source}' AS source_table, local_id, server_id, "
+                    f"create_time, local_type, "
+                    f"real_sender_id, hex(message_content) AS message_hex "
+                    f"FROM {_quoted_identifier(table)} WHERE create_time > {since} "
+                    f"AND create_time <= {scan_until} "
+                    "AND (((CAST(local_type AS INTEGER) & 65535) = 49) "
+                    "OR hex(substr(message_content, 1, 4)) = '28B52FFD')"
+                )
             if not selects:
                 continue
-            rows = db.query(
+            matched_rows = db.query(
                 db_path,
                 "SELECT * FROM (" + " UNION ALL ".join(selects) + ") "
                 f"ORDER BY create_time DESC LIMIT {limit};",
             )
-            for row in rows:
-                table = row.get("source_table", "")
-                m = _fmt_msg(row)
-                m["contact"] = contacts.resolve_contact_name(name2id.get(table, table))
-                hits.append(m)
+            for row in matched_rows:
+                append_if_match(db_path, row)
+
+            fallback_matches = 0
+            for row in _iter_query_pages(db_path, fallback_selects):
+                if append_if_match(db_path, row):
+                    fallback_matches += 1
+                    if fallback_matches >= limit:
+                        break
     hits.sort(key=lambda x: x["_ts"], reverse=True)
     hits = hits[:limit]
     return {"keyword": keyword, "count": len(hits), "messages": hits}
@@ -152,7 +212,7 @@ def summary(days: int = 3) -> dict:
                 f"SELECT create_time, local_type, real_sender_id, "
                 f"hex(message_content) AS message_hex FROM {table} "
                 f"WHERE create_time > {since} "
-                f"AND ((CAST(local_type AS INTEGER) & 65535) IN (1, 10000, 10002)) "
+                f"AND ((CAST(local_type AS INTEGER) & 65535) IN (1, 49, 10000, 10002)) "
                 f"ORDER BY create_time DESC LIMIT 30;")
             text = [m for m in (_fmt_msg(r) for r in rows) if m["is_text"]]
             if text:
@@ -231,7 +291,10 @@ def stats(days: int = 30) -> dict:
     from collections import Counter
     name2id = db.get_name2id()
     since = int(time.time()) - days * 86400
-    by_contact, by_type, by_day = Counter(), Counter(), Counter()
+    by_contact = Counter()
+    by_type = Counter()
+    by_day = Counter()
+    unknown_app_types = Counter()
     total = 0
     for db_path, tabs in _msg_dbs_tables():
         for table in (t for t in tabs if t.startswith("Msg_")):
@@ -252,14 +315,30 @@ def stats(days: int = 30) -> dict:
                         content,
                         default_event="recall" if type_key == "10002" else "",
                     )["label"]
+                elif type_key == "49":
+                    parsed_app = appmsg.parse_app_message(
+                        _row_content(r), r.get("local_type", "")
+                    )
+                    type_label = parsed_app["label"]
+                    if parsed_app["app_type"] not in appmsg.APP_MESSAGE_TYPES:
+                        unknown_app_types[parsed_app["app_type"]] += 1
                 else:
                     type_label = message.MSG_TYPES.get(type_key, "其他")
                 by_type[type_label] += 1
                 ts = int(r.get("create_time", "0") or "0")
                 if ts:
                     by_day[datetime.fromtimestamp(ts).strftime("%Y-%m-%d")] += 1
-    return {"days": days, "total": total, "by_contact": by_contact.most_common(15),
-            "by_type": by_type.most_common(), "by_day": sorted(by_day.items())}
+    return {
+        "days": days,
+        "total": total,
+        "by_contact": by_contact.most_common(15),
+        "by_type": by_type.most_common(),
+        "by_day": sorted(by_day.items()),
+        "unknown_app_types": [
+            {"app_type": app_type, "count": count}
+            for app_type, count in unknown_app_types.most_common()
+        ],
+    }
 
 
 def media(out: str = "") -> dict:
@@ -279,36 +358,8 @@ def openfile(name: str, limit: int = 8000) -> dict:
     return {"path": matches[0], "matches": len(matches), "content": read_doc.read_file(matches[0], limit)}
 
 
-def _zstd_decompress(data: bytes) -> bytes:
-    try:
-        import zstd
-        return zstd.decompress(data)
-    except Exception:
-        pass
-    try:
-        import zstandard
-        return zstandard.ZstdDecompressor().decompress(data)
-    except Exception:
-        pass
-    import pyzstd
-    return pyzstd.decompress(data)
-
-
 def _decode_content(mc) -> str:
-    # message_content 可能是明文 str, 或 zstd 压缩 bytes (WeChat 4.x 长消息, 魔数 28 b5 2f fd)
-    if mc is None:
-        return ""
-    if isinstance(mc, str):
-        return mc
-    if isinstance(mc, (bytes, bytearray)):
-        b = bytes(mc)
-        if b[:4] == b"\x28\xb5\x2f\xfd":
-            try:
-                b = _zstd_decompress(b)
-            except Exception:
-                return message.extract_text_from_blob(b)
-        return b.decode("utf-8", "ignore")
-    return str(mc)
+    return message.decode_message_content(mc)
 
 
 def _row_content(row: dict) -> str:
@@ -319,6 +370,23 @@ def _row_content(row: dict) -> str:
         except ValueError:
             return ""
     return _decode_content(row.get("message_content"))
+
+
+def _searchable_text(row: dict) -> str:
+    type_key = message.normalize_type(row.get("local_type", ""))
+    content = _row_content(row)
+    if type_key in ("10000", "10002"):
+        system = message.parse_system_message(
+            content,
+            default_event="recall" if type_key == "10002" else "",
+        )
+        return " ".join((system["label"], system["event"], system["text"], content))
+    if type_key == "49":
+        parsed = appmsg.parse_app_message(content, row.get("local_type", ""))
+        return " ".join(
+            [content, *(str(value) for value in parsed.values() if value is not None)]
+        )
+    return " ".join((message.MSG_TYPES.get(type_key, "其他"), content))
 
 
 def _fmt_msg(row: dict) -> dict:
@@ -345,6 +413,21 @@ def _fmt_msg(row: dict) -> dict:
             "is_system": True,
         }
     is_me = message.is_my_message(row.get("real_sender_id", ""))
+    if type_key == "49":
+        app = appmsg.parse_app_message(content, row.get("local_type", ""))
+        details = app["summary"].replace("\n", " ")[:500]
+        display = f"[{app['label']}]" + (f" {details}" if details else "")
+        return {
+            "time": message.format_time(ts),
+            "_ts": ts_int,
+            "direction": "[我]" if is_me else "[对方]",
+            "type": app["label"],
+            "event": None,
+            "content": display,
+            "is_text": True,
+            "is_system": False,
+            "app": app,
+        }
     is_text = type_key == "1" and not content.startswith("<")
     return {
         "time": message.format_time(ts), "_ts": ts_int,
@@ -405,6 +488,12 @@ def _human(cmd: str, r) -> str:
         out += [f"  {n:>5}  {c}" for c, n in r["by_contact"]]
         out.append("\n类型分布:")
         out += [f"  {n:>5}  {t}" for t, n in r["by_type"]]
+        if r.get("unknown_app_types"):
+            out.append("\n未识别分享子类型:")
+            out += [
+                f"  {item['count']:>5}  app_type={item['app_type']}"
+                for item in r["unknown_app_types"]
+            ]
         return "\n".join(out)
     if cmd == "media":
         return f"导出 → {r['out']}: {r['docs']} 文档, {r['videos']} 视频, {r['images']} 图片(跳过 {r['enc_dat']} 个 .dat 加密原图)"
