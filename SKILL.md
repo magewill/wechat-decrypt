@@ -40,6 +40,7 @@ On Windows, use the equivalent venv Python path. Interpret `fail` as blocking an
 | Review shared music, videos, Channels, mini programs, files, or links | Use normal read/search/summary tools; inspect the structured `app` object in CLI JSON when exact metadata matters |
 | Statistics, media, or a received document | CLI `stats`, `media`, or `openfile` |
 | Export history or transcribe voice | Read [references/export-transcription.md](references/export-transcription.md) |
+| Missing chats, a missing shard, or a corrupted database | Read [references/db-repair.md](references/db-repair.md) |
 | macOS setup, key failure, or WeChat update | Read [references/macos.md](references/macos.md) |
 | Windows setup, key failure, or WeChat update | Read [references/windows.md](references/windows.md) |
 
@@ -65,3 +66,4 @@ MCP is a thin optional facade. If it is unavailable, use the same logic through 
 - Voice transcription is offline after the model is cached. A first large-v3 download is about 3 GB and always requires user approval.
 - Type-49 app messages are parsed locally. Preserve their structured `app` metadata when answering questions about titles, creators, sources, URLs, files, mini programs, or Channels; unknown subtypes may still contain useful fields.
 - Setup migrates only missing private files from legacy installs. Switching an existing user-skill link requires the explicit platform upgrade flag and leaves a recoverable backup.
+- A damaged shard is quarantined into `<name>.db.factory/` and is usually recoverable page by page. Never repair a live database in place: rebuild into a copy, verify it, and back up before restoring anything.
