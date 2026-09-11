@@ -12,7 +12,7 @@
 ```bash
 python3 e2e/test_e2e.py            # 端到端 13 项（轻量）
 python3 e2e/test_e2e.py --full     # 15 项，增加 media/export（慢）
-python3 e2e/check_consistency.py                         # 自动发现 .agents/.codex/.claude
+python3 e2e/check_consistency.py                         # 自动发现 .grok/.kimi-code/.agents/.codex/.claude
 python3 e2e/check_consistency.py --skill-dir /path/to/skill
 python3 e2e/check_consistency.py --with-vendored         # 额外检查 wecom 共享文件
 ```

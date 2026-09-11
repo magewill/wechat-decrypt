@@ -52,17 +52,27 @@ def _runtime_files() -> list[Path]:
 
 
 def _default_skill_dir() -> Path | None:
-    candidates = []
-    if os.environ.get("WECHAT_SKILL_DIR"):
-        candidates.append(Path(os.environ["WECHAT_SKILL_DIR"]).expanduser())
-    candidates.extend(
-        [
-            Path("~/.agents/skills/wechat-decrypt").expanduser(),
-            Path("~/.codex/skills/wechat-decrypt").expanduser(),
-            Path("~/.claude/skills/wechat-decrypt").expanduser(),
-        ]
-    )
-    return next((path for path in candidates if path.is_dir()), None)
+    """Find an installed runtime copy, skipping paths that resolve into the checkout.
+
+    Install locations are often symlinks back to the checkout, and comparing the
+    checkout with itself always passes. Those candidates are skipped.
+    """
+    env = os.environ.get("WECHAT_SKILL_DIR")
+    candidates = ([Path(env).expanduser()] if env else []) + [
+        Path("~/.grok/skills/wechat-decrypt").expanduser(),
+        Path("~/.kimi-code/skills/wechat-decrypt").expanduser(),
+        Path("~/.agents/skills/wechat-decrypt").expanduser(),
+        Path("~/.codex/skills/wechat-decrypt").expanduser(),
+        Path("~/.claude/skills/wechat-decrypt").expanduser(),
+    ]
+    for path in candidates:
+        if not path.is_dir():
+            continue
+        resolved = path.resolve()
+        if resolved == REPO_DIR or REPO_DIR in resolved.parents:
+            continue
+        return path
+    return None
 
 
 def check_runtime(skill_dir: Path) -> list[str]:
